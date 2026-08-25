@@ -2,10 +2,6 @@ import sqlite3
 import random
 import os
 import time
-
-from threading import Thread
-from flask import Flask
-
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -15,8 +11,14 @@ from telegram.ext import (
     filters
 )
 
+from flask import Flask
+from threading import Thread
+
+
 TOKEN = os.environ["BOT_TOKEN"]
 DB = "tinker_bell.db"
+
+COOLDOWN = 4 * 60
 
 POINT_RANGES = {
     1: (5, 15),
@@ -43,112 +45,65 @@ LEVEL_BONUSES = {
     10: 3000
 }
 
-FAIRIES = {
-    "Tinker Bell": {
+FAIRIES = [
+    {
+        "name": "Tinker Bell",
         "talent": "Tinker",
-        "emoji": "🔧",
-        "price": 500
+        "price": 500,
+        "production": 5,
+        "capacity": 500
     },
-    "Silvermist": {
+    {
+        "name": "Silvermist",
         "talent": "Water",
-        "emoji": "💧",
-        "price": 5000
+        "price": 5000,
+        "production": 20,
+        "capacity": 2500
     },
-    "Rosetta": {
+    {
+        "name": "Rosetta",
         "talent": "Garden",
-        "emoji": "🌹",
-        "price": 25000
+        "price": 25000,
+        "production": 70,
+        "capacity": 10000
     },
-    "Iridessa": {
-        "talent": "Light",
-        "emoji": "✨",
-        "price": 100000
-    },
-    "Fawn": {
+    {
+        "name": "Fawn",
         "talent": "Animal",
-        "emoji": "🐾",
-        "price": 350000
+        "price": 100000,
+        "production": 250,
+        "capacity": 40000
     },
-    "Vidia": {
-        "talent": "Fast-Flying",
-        "emoji": "🌪️",
-        "price": 1000000
+    {
+        "name": "Iridessa",
+        "talent": "Light",
+        "price": 400000,
+        "production": 800,
+        "capacity": 120000
     },
-    "Periwinkle": {
+    {
+        "name": "Vidia",
+        "talent": "Fast Flying",
+        "price": 1500000,
+        "production": 2500,
+        "capacity": 350000
+    },
+    {
+        "name": "Periwinkle",
         "talent": "Frost",
-        "emoji": "❄️",
-        "price": 3000000
+        "price": 5000000,
+        "production": 7000,
+        "capacity": 900000
     },
-    "Zarina": {
-        "talent": "Dust-Keeper",
-        "emoji": "✨",
-        "price": 8000000
-    },
-    "Nyx": {
-        "talent": "Scout",
-        "emoji": "🛡️",
-        "price": 20000000
+    {
+        "name": "Zarina",
+        "talent": "Pixie Dust",
+        "price": 15000000,
+        "production": 18000,
+        "capacity": 2000000
     }
-}
+]
 
-PRODUCTION = {
-    1: 2,
-    2: 3,
-    3: 4,
-    4: 5,
-    5: 6,
-    6: 7,
-    7: 8,
-    8: 9,
-    9: 10,
-    10: 11,
-    11: 12,
-    12: 13,
-    13: 14,
-    14: 15,
-    15: 16,
-    16: 17,
-    17: 18,
-    18: 19,
-    19: 20,
-    20: 22,
-    21: 24,
-    22: 26,
-    23: 29,
-    24: 32,
-    25: 36
-}
-
-MAX_FAIRY_LEVEL = 25
-MAX_OFFLINE_SECONDS = 24 * 60 * 60
-
-health_app = Flask(__name__)
-
-@health_app.route("/")
-def health():
-    return "Tinker Bell Bot is running!"
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    health_app.run(
-        host="0.0.0.0",
-        port=port
-    )
-
-def get_level(tinkies):
-    return (tinkies // 25) + 1
-
-def get_production(level):
-    return PRODUCTION.get(
-        level,
-        PRODUCTION[MAX_FAIRY_LEVEL]
-    )
-
-def get_capacity(level):
-    return 10000 * level
-
-def get_upgrade_cost(level):
-    return 100 * (level ** 2)
 
 def setup_database():
     connection = sqlite3.connect(DB)
@@ -158,44 +113,43 @@ def setup_database():
             user_id INTEGER PRIMARY KEY,
             name TEXT,
             tinkies INTEGER DEFAULT 0,
-            points INTEGER DEFAULT 0
+            points INTEGER DEFAULT 0,
+            last_tinky REAL DEFAULT 0
         )
     """)
 
     connection.execute("""
-        CREATE TABLE IF NOT EXISTS user_fairies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            fairy_name TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS fairies (
+            user_id INTEGER,
+            fairy_index INTEGER,
             level INTEGER DEFAULT 1,
-            last_collect INTEGER DEFAULT 0,
-            UNIQUE(user_id, fairy_name)
+            stored_points REAL DEFAULT 0,
+            last_collection REAL DEFAULT 0,
+            PRIMARY KEY (user_id, fairy_index)
         )
     """)
 
-    columns = connection.execute(
-        "PRAGMA table_info(user_fairies)"
-    ).fetchall()
-
-    column_names = [column[1] for column in columns]
-
-    if "last_collect" not in column_names:
+    try:
         connection.execute(
-            """
-            ALTER TABLE user_fairies
-            ADD COLUMN last_collect INTEGER DEFAULT 0
-            """
+            "ALTER TABLE users ADD COLUMN last_tinky REAL DEFAULT 0"
         )
+    except sqlite3.OperationalError:
+        pass
 
     connection.commit()
     connection.close()
+
+
+def get_level(tinkies):
+    return min((tinkies // 25) + 1, 25)
+
 
 def get_user(user_id, name):
     connection = sqlite3.connect(DB)
 
     user = connection.execute(
         """
-        SELECT tinkies, points
+        SELECT tinkies, points, last_tinky
         FROM users
         WHERE user_id = ?
         """,
@@ -206,58 +160,97 @@ def get_user(user_id, name):
         connection.execute(
             """
             INSERT INTO users
-            (user_id, name, tinkies, points)
-            VALUES (?, ?, 0, 0)
+            (user_id, name, tinkies, points, last_tinky)
+            VALUES (?, ?, 0, 0, 0)
             """,
             (user_id, name)
         )
 
         connection.commit()
-        user = (0, 0)
+        user = (0, 0, 0)
 
     connection.close()
 
     return user
 
+
 def save_user(
     user_id,
     name,
     tinkies,
-    points
+    points,
+    last_tinky
 ):
     connection = sqlite3.connect(DB)
 
     connection.execute(
         """
         INSERT INTO users
-        (user_id, name, tinkies, points)
-        VALUES (?, ?, ?, ?)
+        (user_id, name, tinkies, points, last_tinky)
+        VALUES (?, ?, ?, ?, ?)
+
         ON CONFLICT(user_id)
         DO UPDATE SET
             name = excluded.name,
             tinkies = excluded.tinkies,
-            points = excluded.points
+            points = excluded.points,
+            last_tinky = excluded.last_tinky
         """,
         (
             user_id,
             name,
             tinkies,
-            points
+            points,
+            last_tinky
         )
     )
 
     connection.commit()
     connection.close()
 
-def get_user_fairies(user_id):
+
+def get_fairy(user_id, fairy_index):
+    connection = sqlite3.connect(DB)
+
+    fairy = connection.execute(
+        """
+        SELECT level, stored_points, last_collection
+        FROM fairies
+        WHERE user_id = ? AND fairy_index = ?
+        """,
+        (user_id, fairy_index)
+    ).fetchone()
+
+    connection.close()
+
+    return fairy
+
+
+def add_fairy(user_id, fairy_index):
+    connection = sqlite3.connect(DB)
+
+    connection.execute(
+        """
+        INSERT INTO fairies
+        (user_id, fairy_index, level, stored_points, last_collection)
+        VALUES (?, ?, 1, 0, ?)
+        """,
+        (user_id, fairy_index, time.time())
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def get_owned_fairies(user_id):
     connection = sqlite3.connect(DB)
 
     fairies = connection.execute(
         """
-        SELECT fairy_name, level, last_collect
-        FROM user_fairies
+        SELECT fairy_index, level, stored_points, last_collection
+        FROM fairies
         WHERE user_id = ?
-        ORDER BY id
+        ORDER BY fairy_index
         """,
         (user_id,)
     ).fetchall()
@@ -266,340 +259,408 @@ def get_user_fairies(user_id):
 
     return fairies
 
-def has_fairy(user_id, fairy_name):
-    connection = sqlite3.connect(DB)
 
-    result = connection.execute(
-        """
-        SELECT id
-        FROM user_fairies
-        WHERE user_id = ?
-        AND fairy_name = ?
-        """,
-        (
-            user_id,
-            fairy_name
-        )
-    ).fetchone()
+def get_production(fairy_index, level):
+    base = FAIRIES[fairy_index]["production"]
 
-    connection.close()
+    return int(base * (1 + ((level - 1) * 0.35)))
 
-    return result is not None
 
-def get_pending_for_fairy(
-    fairy_name,
-    level,
-    last_collect
-):
-    now = int(time.time())
+def get_capacity(fairy_index, level):
+    base = FAIRIES[fairy_index]["capacity"]
 
-    elapsed = max(
-        0,
-        now - last_collect
-    )
+    return int(base * (1 + ((level - 1) * 0.30)))
 
-    elapsed = min(
-        elapsed,
-        MAX_OFFLINE_SECONDS
-    )
 
-    production = get_production(level)
-    capacity = get_capacity(level)
+def update_fairy_storage(user_id, fairy_index):
+    fairy = get_fairy(user_id, fairy_index)
 
-    earned = min(
-        int(elapsed * production),
-        capacity
-    )
-
-    return earned
-
-def get_total_production(user_id):
-    fairies = get_user_fairies(user_id)
-
-    total = 0
-
-    for fairy_name, level, last_collect in fairies:
-        total += get_production(level)
-
-    return total
-
-def collect_pending(user_id):
-    fairies = get_user_fairies(user_id)
-
-    if not fairies:
-        return 0, []
-
-    now = int(time.time())
-    total_earned = 0
-    results = []
-
-    connection = sqlite3.connect(DB)
-
-    for fairy_name, level, last_collect in fairies:
-        earned = get_pending_for_fairy(
-            fairy_name,
-            level,
-            last_collect
-        )
-
-        total_earned += earned
-
-        results.append(
-            (
-                fairy_name,
-                level,
-                earned
-            )
-        )
-
-        connection.execute(
-            """
-            UPDATE user_fairies
-            SET last_collect = ?
-            WHERE user_id = ?
-            AND fairy_name = ?
-            """,
-            (
-                now,
-                user_id,
-                fairy_name
-            )
-        )
-
-    connection.commit()
-    connection.close()
-
-    return total_earned, results
-
-async def collect(update: Update):
-    user = update.effective_user
-
-    tinkies, points = get_user(
-        user.id,
-        user.first_name or "Fairy"
-    )
-
-    user_fairies = get_user_fairies(user.id)
-
-    if not user_fairies:
-        await update.message.reply_text(
-            "🧚‍♀️✨ هنوز هیچ پری‌ای نداری!\n\n"
-            "اول یک Fairy بخر تا شروع به تولید Tinky Points کنه."
-        )
+    if fairy is None:
         return
 
-    earned, results = collect_pending(user.id)
+    level, stored, last_collection = fairy
 
-    new_points = points + earned
+    now = time.time()
 
-    save_user(
-        user.id,
-        user.first_name or "Fairy",
-        tinkies,
-        new_points
+    elapsed = max(0, now - last_collection)
+
+    production = get_production(
+        fairy_index,
+        level
     )
 
-    message = "🧚‍♀️✨ FAIRY COLLECTION ✨🧚‍♀️\n\n"
-
-    for fairy_name, level, amount in results:
-        data = FAIRIES[fairy_name]
-        capacity = get_capacity(level)
-
-        message += (
-            f"{data['emoji']} {fairy_name} Lv.{level}\n"
-            f"💚 +{amount:,} TP\n"
-            f"📦 Capacity: {capacity:,} TP\n\n"
-        )
-
-    message += (
-        f"💚 Total Collected: +{earned:,} TP\n"
-        f"💰 Balance: {new_points:,} TP"
+    capacity = get_capacity(
+        fairy_index,
+        level
     )
 
-    await update.message.reply_text(message)
+    generated = elapsed * production
 
-async def fairies(update: Update):
-    user = update.effective_user
-
-    owned = {
-        fairy_name: level
-        for fairy_name, level, last_collect
-        in get_user_fairies(user.id)
-    }
-
-    message = "🧚‍♀️✨ FAIRY SHOP ✨🧚‍♀️\n\n"
-
-    for index, (fairy_name, data) in enumerate(
-        FAIRIES.items(),
-        start=1
-    ):
-        if fairy_name in owned:
-            level = owned[fairy_name]
-
-            message += (
-                f"{index}. {data['emoji']} {fairy_name}\n"
-                f"🌿 Talent: {data['talent']}\n"
-                f"🌟 Level: {level}/25\n"
-                f"💚 Production: {get_production(level)} TP/sec\n"
-                f"📦 Capacity: {get_capacity(level):,} TP\n\n"
-            )
-        else:
-            message += (
-                f"{index}. {data['emoji']} {fairy_name}\n"
-                f"🌿 Talent: {data['talent']}\n"
-                f"💰 Price: {data['price']:,} TP\n\n"
-            )
-
-    await update.message.reply_text(message)
-
-async def buy_fairy(
-    update: Update,
-    fairy_name
-):
-    user = update.effective_user
-
-    if fairy_name not in FAIRIES:
-        await update.message.reply_text(
-            "❌ این Fairy وجود نداره."
-        )
-        return
-
-    tinkies, points = get_user(
-        user.id,
-        user.first_name or "Fairy"
+    stored = min(
+        capacity,
+        stored + generated
     )
-
-    if has_fairy(
-        user.id,
-        fairy_name
-    ):
-        await update.message.reply_text(
-            f"🧚‍♀️ تو قبلاً {fairy_name} رو داری!\n\n"
-            "📈 برای ارتقاش از «ارتقا» استفاده کن."
-        )
-        return
-
-    owned = get_user_fairies(user.id)
-
-    if owned:
-        last_fairy_name, last_level, last_collect = owned[-1]
-
-        if last_level < MAX_FAIRY_LEVEL:
-            await update.message.reply_text(
-                "🔒 Fairy بعدی هنوز باز نشده!\n\n"
-                f"🧚 {last_fairy_name}\n"
-                f"🌟 Level: {last_level}/25\n\n"
-                f"✨ اول باید {last_fairy_name} رو به Level 25 برسونی."
-            )
-            return
-
-    data = FAIRIES[fairy_name]
-    price = data["price"]
-
-    if points < price:
-        await update.message.reply_text(
-            "💚 Tinky Points کافی نداری!\n\n"
-            f"🧚 Fairy: {fairy_name}\n"
-            f"💰 Price: {price:,} TP\n"
-            f"💚 Your Points: {points:,} TP\n"
-            f"❌ Need: {price - points:,} TP"
-        )
-        return
-
-    now = int(time.time())
 
     connection = sqlite3.connect(DB)
 
     connection.execute(
         """
-        INSERT INTO user_fairies
-        (user_id, fairy_name, level, last_collect)
-        VALUES (?, ?, 1, ?)
+        UPDATE fairies
+        SET stored_points = ?,
+            last_collection = ?
+        WHERE user_id = ?
+        AND fairy_index = ?
         """,
         (
-            user.id,
-            fairy_name,
-            now
+            stored,
+            now,
+            user_id,
+            fairy_index
         )
     )
 
     connection.commit()
     connection.close()
 
-    new_points = points - price
+
+def update_all_fairies(user_id):
+    fairies = get_owned_fairies(user_id)
+
+    for fairy in fairies:
+        fairy_index = fairy[0]
+        update_fairy_storage(
+            user_id,
+            fairy_index
+        )
+
+
+def format_number(number):
+    return f"{int(number):,}"
+
+
+async def send_profile(update: Update):
+    user = update.effective_user
+
+    tinkies, points, last_tinky = get_user(
+        user.id,
+        user.first_name or "Fairy"
+    )
+
+    level = get_level(tinkies)
+
+    if level >= 25:
+        remaining = 0
+    else:
+        remaining = 25 - (tinkies % 25)
+
+    low, high = POINT_RANGES.get(
+        level,
+        POINT_RANGES[10]
+    )
+
+    await update.message.reply_text(
+        "🧚‍♀️✨ پروفایل تینکی ✨🧚‍♀️\n\n"
+        f"🌟 سطح: {level}\n"
+        f"🔔 تینکی‌ها: {tinkies}\n"
+        f"💚 امتیاز تینکی: {format_number(points)}\n\n"
+        f"🎲 امتیاز هر تینکی: {low}–{high}\n"
+        f"✨ تا سطح بعدی: {remaining} تینکی"
+    )
+
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.message.reply_text(
+        "🧚‍♀️✨ تینکر بل ✨🧚‍♀️\n\n"
+        "سلام پری کوچولو! 🌸\n"
+        "به سرزمین پری‌ها خوش اومدی! 🧚‍♀️🌿\n\n"
+        "🔔 با گفتن «تینک» می‌تونی تینکی و امتیاز تینکی بگیری.\n\n"
+        "💚 با امتیازهای تینکی می‌تونی:\n\n"
+        "🧚‍♀️ پری بخری\n"
+        "📈 پری‌هات رو تا سطح ۲۵ ارتقا بدی\n"
+        "⚡ از پری‌هات امتیاز جمع کنی\n"
+        "📦 ظرفیت پری‌هات رو افزایش بدی\n"
+        "🔓 بعد از رسیدن اولین پری به سطح ۲۵، پری بعدی رو آزاد کنی\n\n"
+        "✨ هر پری:\n"
+        "🌿 یک استعداد مخصوص داره\n"
+        "⚡ در هر ثانیه امتیاز تولید می‌کنه\n"
+        "📦 ظرفیت مشخصی برای ذخیره امتیاز داره\n\n"
+        "📋 امکانات:\n\n"
+        "👤 پروفایل\n"
+        "🧚‍♀️ فروشگاه پری‌ها\n"
+        "💚 جمع کردن امتیازها\n"
+        "🧚‍♀️ پری‌های من\n\n"
+        "🌸 آماده‌ای وارد سرزمین پری‌ها بشی؟\n\n"
+        "✨ بگو «تینک» تا شروع کنیم! ✨"
+    )
+
+
+async def fairies(update: Update):
+    user = update.effective_user
+
+    tinkies, points, last_tinky = get_user(
+        user.id,
+        user.first_name or "Fairy"
+    )
+
+    owned = get_owned_fairies(user.id)
+
+    next_index = len(owned)
+
+    if next_index >= len(FAIRIES):
+        await update.message.reply_text(
+            "🧚‍♀️✨ فروشگاه پری‌ها ✨🧚‍♀️\n\n"
+            "🎉 همه پری‌ها رو آزاد کردی!\n\n"
+            "👑 تو به بالاترین مرحله فروشگاه رسیدی!"
+        )
+        return
+
+    await update.message.reply_text(
+        "🧚‍♀️✨ فروشگاه پری‌ها ✨🧚‍♀️\n\n"
+        "پری‌ها به ترتیب باز می‌شن! 🌸\n\n"
+        "🔓 هر پری جدید فقط وقتی قابل خرید می‌شه "
+        "که پری قبلی به سطح ۲۵ رسیده باشه.\n\n"
+        "💚 با امتیازهای تینکی می‌تونی پری‌هات رو "
+        "بخری و ارتقا بدی.\n\n"
+        "⚡ هر پری در هر ثانیه امتیاز تولید می‌کنه.\n"
+        "📦 هر پری ظرفیت مشخصی برای ذخیره امتیاز داره.\n\n"
+        "🌟 پری‌هات رو ارتقا بده، قوی‌ترشون کن "
+        "و پری بعدی رو آزاد کن! ✨\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"🧚‍♀️ {FAIRIES[next_index]['name']}\n"
+        f"🌿 استعداد: {FAIRIES[next_index]['talent']}\n\n"
+        f"💰 قیمت: {format_number(FAIRIES[next_index]['price'])} امتیاز\n"
+        f"⚡ تولید اولیه: {FAIRIES[next_index]['production']} در ثانیه\n"
+        f"📦 ظرفیت اولیه: {format_number(FAIRIES[next_index]['capacity'])}\n\n"
+        f"💚 موجودی شما: {format_number(points)} امتیاز"
+    )
+
+
+async def my_fairies(update: Update):
+    user = update.effective_user
+
+    owned = get_owned_fairies(user.id)
+
+    if not owned:
+        await update.message.reply_text(
+            "🧚‍♀️✨ پری‌های من ✨🧚‍♀️\n\n"
+            "هنوز پری‌ای نداری! 🌸\n\n"
+            "💚 از فروشگاه اولین پریت رو بخر."
+        )
+        return
+
+    update_all_fairies(user.id)
+
+    owned = get_owned_fairies(user.id)
+
+    message = "🧚‍♀️✨ پری‌های من ✨🧚‍♀️\n\n"
+
+    for fairy_index, level, stored, last_collection in owned:
+        fairy = FAIRIES[fairy_index]
+
+        production = get_production(
+            fairy_index,
+            level
+        )
+
+        capacity = get_capacity(
+            fairy_index,
+            level
+        )
+
+        message += (
+            f"🧚‍♀️ {fairy['name']}\n"
+            f"🌟 سطح: {level}/25\n"
+            f"⚡ تولید: {format_number(production)} در ثانیه\n"
+            f"📦 ظرفیت: {format_number(capacity)}\n"
+            f"💚 ذخیره: {format_number(stored)}\n\n"
+        )
+
+    await update.message.reply_text(message)
+
+
+async def collect(update: Update):
+    user = update.effective_user
+
+    owned = get_owned_fairies(user.id)
+
+    if not owned:
+        await update.message.reply_text(
+            "💚 هنوز امتیازی از پری‌ها برای جمع کردن نداری."
+        )
+        return
+
+    update_all_fairies(user.id)
+
+    owned = get_owned_fairies(user.id)
+
+    total = 0
+
+    connection = sqlite3.connect(DB)
+
+    for fairy_index, level, stored, last_collection in owned:
+        amount = int(stored)
+
+        total += amount
+
+        connection.execute(
+            """
+            UPDATE fairies
+            SET stored_points = stored_points - ?
+            WHERE user_id = ?
+            AND fairy_index = ?
+            """,
+            (
+                amount,
+                user.id,
+                fairy_index
+            )
+        )
+
+    connection.commit()
+    connection.close()
+
+    tinkies, points, last_tinky = get_user(
+        user.id,
+        user.first_name or "Fairy"
+    )
+
+    new_points = points + total
 
     save_user(
         user.id,
         user.first_name or "Fairy",
         tinkies,
-        new_points
+        new_points,
+        last_tinky
     )
 
     await update.message.reply_text(
-        "🧚‍♀️✨ NEW FAIRY! ✨🧚‍♀️\n\n"
-        f"{data['emoji']} {fairy_name}\n"
-        f"🌿 Talent: {data['talent']}\n"
-        f"🌟 Level: 1/25\n"
-        f"💚 Production: {get_production(1)} TP/sec\n"
-        f"📦 Capacity: {get_capacity(1):,} TP\n\n"
-        f"💰 Paid: {price:,} TP\n"
-        f"💚 Remaining: {new_points:,} TP"
+        "💚✨ امتیازها جمع شدند! ✨💚\n\n"
+        f"💚 +{format_number(total)} امتیاز تینکی\n"
+        f"💰 موجودی: {format_number(new_points)}"
     )
 
-async def upgrade_fairy(
-    update: Update,
-    fairy_name
-):
+
+async def upgrade(update: Update):
     user = update.effective_user
 
-    connection = sqlite3.connect(DB)
+    owned = get_owned_fairies(user.id)
 
-    result = connection.execute(
-        """
-        SELECT level
-        FROM user_fairies
-        WHERE user_id = ?
-        AND fairy_name = ?
-        """,
-        (
-            user.id,
-            fairy_name
-        )
-    ).fetchone()
-
-    connection.close()
-
-    if result is None:
+    if not owned:
         await update.message.reply_text(
-            "❌ این Fairy رو نداری."
+            "🧚‍♀️ هنوز پری‌ای نداری که ارتقاش بدی!"
         )
         return
 
-    level = result[0]
+    update_all_fairies(user.id)
 
-    if level >= MAX_FAIRY_LEVEL:
+    owned = get_owned_fairies(user.id)
+
+    message = "🧚‍♀️✨ ارتقای پری ✨🧚‍♀️\n\n"
+
+    for fairy_index, level, stored, last_collection in owned:
+        fairy = FAIRIES[fairy_index]
+
+        if level >= 25:
+            message += (
+                f"👑 {fairy['name']}\n"
+                "🌟 سطح: 25/25\n"
+                "✨ MAX LEVEL!\n\n"
+            )
+            continue
+
+        upgrade_cost = int(
+            fairy["price"] * (level ** 1.7)
+        )
+
+        production = get_production(
+            fairy_index,
+            level
+        )
+
+        capacity = get_capacity(
+            fairy_index,
+            level
+        )
+
+        message += (
+            f"🔧 {fairy['name']}\n\n"
+            f"🌟 سطح فعلی: {level}/25\n\n"
+            f"⚡ تولید فعلی:\n"
+            f"{format_number(production)} امتیاز در ثانیه\n\n"
+            f"📦 ظرفیت فعلی:\n"
+            f"{format_number(capacity)} امتیاز\n\n"
+            f"💰 هزینه ارتقا:\n"
+            f"{format_number(upgrade_cost)} امتیاز\n\n"
+            f"💚 موجودی شما:\n"
+            f"{format_number(get_user(user.id, user.first_name or 'Fairy')[1])} امتیاز\n\n"
+        )
+
+    await update.message.reply_text(message)
+
+
+async def upgrade_fairy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    if not context.args:
+        await upgrade(update)
+        return
+
+    try:
+        fairy_index = int(context.args[0]) - 1
+    except ValueError:
         await update.message.reply_text(
-            f"🌟 {fairy_name} همین الان MAX LEVEL هست!\n\n"
-            "✨ Level 25/25"
+            "❌ شماره پری درست نیست."
         )
         return
 
-    cost = get_upgrade_cost(level)
+    owned = get_owned_fairies(user.id)
 
-    tinkies, points = get_user(
+    owned_indexes = [
+        fairy[0]
+        for fairy in owned
+    ]
+
+    if fairy_index not in owned_indexes:
+        await update.message.reply_text(
+            "❌ این پری رو نداری."
+        )
+        return
+
+    update_all_fairies(user.id)
+
+    fairy_data = get_fairy(
+        user.id,
+        fairy_index
+    )
+
+    level, stored, last_collection = fairy_data
+
+    if level >= 25:
+        await update.message.reply_text(
+            "🎉✨ این پری به MAX LEVEL رسیده! ✨🎉"
+        )
+        return
+
+    fairy = FAIRIES[fairy_index]
+
+    upgrade_cost = int(
+        fairy["price"] * (level ** 1.7)
+    )
+
+    tinkies, points, last_tinky = get_user(
         user.id,
         user.first_name or "Fairy"
     )
 
-    if points < cost:
+    if points < upgrade_cost:
         await update.message.reply_text(
-            "❌ Tinky Points کافی نداری!\n\n"
-            f"🧚 {fairy_name}\n"
-            f"🌟 Current Level: {level}/25\n"
-            f"📈 Next Level: {level + 1}\n"
-            f"💰 Upgrade Cost: {cost:,} TP\n"
-            f"💚 Your Points: {points:,} TP\n"
-            f"❌ Need: {cost - points:,} TP"
+            "❌ امتیاز کافی نداری!\n\n"
+            f"💰 هزینه ارتقا: {format_number(upgrade_cost)}\n"
+            f"💚 موجودی شما: {format_number(points)}"
         )
         return
 
@@ -609,152 +670,145 @@ async def upgrade_fairy(
 
     connection.execute(
         """
-        UPDATE user_fairies
+        UPDATE fairies
         SET level = ?
         WHERE user_id = ?
-        AND fairy_name = ?
+        AND fairy_index = ?
         """,
         (
             new_level,
             user.id,
-            fairy_name
+            fairy_index
         )
     )
 
     connection.commit()
     connection.close()
 
-    new_points = points - cost
+    new_points = points - upgrade_cost
 
     save_user(
         user.id,
         user.first_name or "Fairy",
         tinkies,
-        new_points
+        new_points,
+        last_tinky
     )
 
-    production = get_production(new_level)
-    capacity = get_capacity(new_level)
+    production = get_production(
+        fairy_index,
+        new_level
+    )
+
+    capacity = get_capacity(
+        fairy_index,
+        new_level
+    )
 
     message = (
-        "🧚‍♀️✨ FAIRY UPGRADED! ✨🧚‍♀️\n\n"
-        f"🧚 {fairy_name}\n"
-        f"🌟 Level: {new_level}/25\n"
-        f"💚 Production: {production} TP/sec\n"
-        f"📦 Capacity: {capacity:,} TP\n\n"
-        f"💰 Upgrade Cost: {cost:,} TP\n"
-        f"💚 Remaining: {new_points:,} TP"
+        "🧚‍♀️✨ ارتقا با موفقیت انجام شد! ✨🧚‍♀️\n\n"
+        f"🔧 {fairy['name']}\n\n"
+        f"🌟 سطح جدید: {new_level}/25\n\n"
+        f"⚡ تولید: {format_number(production)} امتیاز در ثانیه\n"
+        f"📦 ظرفیت: {format_number(capacity)} امتیاز\n\n"
+        f"💚 هزینه پرداخت‌شده:\n"
+        f"{format_number(upgrade_cost)} امتیاز\n\n"
+        f"💰 موجودی شما:\n"
+        f"{format_number(new_points)} امتیاز\n\n"
+        "🌸 پری شما قوی‌تر شد!"
     )
 
-    if new_level == MAX_FAIRY_LEVEL:
+    if new_level == 25:
+        next_fairy = fairy_index + 1
+
         message += (
-            "\n\n🎉🎉 MAX LEVEL! 🎉🎉\n\n"
-            "🔓 Fairy بعدی باز شد!"
+            "\n\n"
+            "🎉✨ MAX LEVEL! ✨🎉\n\n"
         )
+
+        if next_fairy < len(FAIRIES):
+            message += (
+                "🔓 پری بعدی برای خرید آزاد شد!\n"
+                f"🧚‍♀️ {FAIRIES[next_fairy]['name']}"
+            )
+        else:
+            message += (
+                "👑 همه پری‌ها رو آزاد کردی!"
+            )
 
     await update.message.reply_text(message)
 
-async def send_profile(update: Update):
+
+async def buy_fairy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    tinkies, points = get_user(
+    tinkies, points, last_tinky = get_user(
         user.id,
         user.first_name or "Fairy"
     )
 
-    level = get_level(tinkies)
-    remaining = 25 - (tinkies % 25)
+    owned = get_owned_fairies(user.id)
 
-    low, high = POINT_RANGES.get(
-        level,
-        POINT_RANGES[10]
-    )
+    next_index = len(owned)
 
-    total_production = get_total_production(user.id)
-    user_fairies = get_user_fairies(user.id)
-
-    message = (
-        "🧚‍♀️✨ TINKY PROFILE ✨🧚‍♀️\n\n"
-        f"🌟 Level: {level}\n"
-        f"🔔 Tinkies: {tinkies}\n"
-        f"💚 Tinky Points: {points:,}\n\n"
-        f"🎲 Points per Tinky: {low}–{high}\n"
-        f"✨ تا Level بعدی: {remaining} Tinky\n\n"
-        f"⚡ Total Production: {total_production:g} TP/sec\n"
-        f"🧚‍♀️ Fairies: {len(user_fairies)}\n"
-    )
-
-    if user_fairies:
-        message += "\n"
-
-        for fairy_name, fairy_level, last_collect in user_fairies:
-            data = FAIRIES[fairy_name]
-
-            message += (
-                f"{data['emoji']} {fairy_name}\n"
-                f"🌿 {data['talent']}\n"
-                f"🌟 Lv.{fairy_level}/25\n"
-                f"💚 {get_production(fairy_level)} TP/sec\n"
-                f"📦 {get_capacity(fairy_level):,} TP\n\n"
-            )
-    else:
-        message += (
-            "\n🧚‍♀️ هنوز Fairy نداری.\n"
-            "از /fairies برای خرید استفاده کن."
-        )
-
-    await update.message.reply_text(message)
-
-async def my_fairies(update: Update):
-    user = update.effective_user
-
-    user_fairies = get_user_fairies(user.id)
-
-    if not user_fairies:
+    if next_index >= len(FAIRIES):
         await update.message.reply_text(
-            "🧚‍♀️ هنوز هیچ Fairy نداری!"
+            "🎉 همه پری‌ها رو داری!"
         )
         return
 
-    message = "🧚‍♀️✨ MY FAIRIES ✨🧚‍♀️\n\n"
+    if owned:
+        last_index = owned[-1][0]
+        last_level = owned[-1][1]
 
-    for fairy_name, level, last_collect in user_fairies:
-        data = FAIRIES[fairy_name]
+        if last_level < 25:
+            await update.message.reply_text(
+                "🔒 پری بعدی هنوز قفل است!\n\n"
+                f"🧚‍♀️ {FAIRIES[last_index]['name']}\n"
+                f"🌟 سطح فعلی: {last_level}/25\n\n"
+                "✨ اول این پری رو به سطح ۲۵ برسون."
+            )
+            return
 
-        message += (
-            f"{data['emoji']} {fairy_name}\n"
-            f"🌿 Talent: {data['talent']}\n"
-            f"🌟 Level: {level}/25\n"
-            f"💚 Production: {get_production(level)} TP/sec\n"
-            f"📦 Capacity: {get_capacity(level):,} TP\n"
+    fairy = FAIRIES[next_index]
+
+    if points < fairy["price"]:
+        await update.message.reply_text(
+            "❌ امتیاز کافی نداری!\n\n"
+            f"🧚‍♀️ {fairy['name']}\n"
+            f"💰 قیمت: {format_number(fairy['price'])}\n"
+            f"💚 موجودی: {format_number(points)}"
         )
+        return
 
-        if level < MAX_FAIRY_LEVEL:
-            cost = get_upgrade_cost(level)
-            message += f"📈 Upgrade: {cost:,} TP\n"
-
-        message += "\n"
-
-    await update.message.reply_text(message)
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    await update.message.reply_text(
-        "🧚‍♀️✨ سلام! من Tinker Bell هستم!\n\n"
-        "🔔 با گفتن «تینک» Tinkies و Tinky Points بگیر.\n"
-        "🧚‍♀️ Fairy بخر و تا Level 25 ارتقاش بده.\n"
-        "💚 Fairyها در هر ثانیه Tinky Points تولید می‌کنن.\n"
-        "📦 هر Fairy ظرفیت مخصوص خودش رو داره.\n"
-        "💰 با /collect درآمدت رو جمع کن.\n\n"
-        "📋 /profile\n"
-        "🧚 /fairies\n"
-        "💚 /collect\n"
-        "🧚‍♀️ /myfairies\n\n"
-        "✨ وقتی Fairy فعلیت به Level 25 برسه، "
-        "Fairy بعدی باز می‌شه!"
+    add_fairy(
+        user.id,
+        next_index
     )
+
+    new_points = points - fairy["price"]
+
+    save_user(
+        user.id,
+        user.first_name or "Fairy",
+        tinkies,
+        new_points,
+        last_tinky
+    )
+
+    await update.message.reply_text(
+        "🧚‍♀️✨ پری جدید خریداری شد! ✨🧚‍♀️\n\n"
+        f"🌸 {fairy['name']}\n"
+        f"🌿 استعداد: {fairy['talent']}\n\n"
+        f"🌟 سطح: 1/25\n"
+        f"⚡ تولید: {format_number(fairy['production'])} در ثانیه\n"
+        f"📦 ظرفیت: {format_number(fairy['capacity'])}\n\n"
+        f"💚 هزینه پرداخت‌شده:\n"
+        f"{format_number(fairy['price'])} امتیاز\n\n"
+        f"💰 موجودی شما:\n"
+        f"{format_number(new_points)} امتیاز"
+    )
+
 
 async def handle_message(
     update: Update,
@@ -768,66 +822,54 @@ async def handle_message(
 
     text = update.message.text.casefold().strip()
 
-    if text in [
-        "پروفایل",
-        "تینکیم"
-    ]:
+    if text in ["پروفایل", "تینکیم"]:
         await send_profile(update)
         return
 
-    if text in [
-        "پری ها",
-        "پریها",
-        "پری",
-        "fairies"
-    ]:
+    if text in ["پری ها", "پری‌ها", "پری", "fairies"]:
         await fairies(update)
         return
 
-    if text in [
-        "جمع کن",
-        "collect",
-        "جمع"
-    ]:
-        await collect(update)
-        return
-
-    if text in [
-        "پری های من",
-        "پریهام",
-        "my fairies"
-    ]:
+    if text in ["پری های من", "پری‌های من", "myfairies"]:
         await my_fairies(update)
         return
 
-    if text.startswith("خرید "):
-        fairy_name = text[5:].strip()
-
-        for name in FAIRIES:
-            if name.casefold() == fairy_name:
-                await buy_fairy(update, name)
-                return
-
-    if text.startswith("ارتقا "):
-        fairy_name = text[5:].strip()
-
-        for name in FAIRIES:
-            if name.casefold() == fairy_name:
-                await upgrade_fairy(update, name)
-                return
+    if text in ["جمع کردن", "جمع", "collect"]:
+        await collect(update)
+        return
 
     if "تینک" not in text:
         return
 
     user = update.effective_user
 
-    old_tinkies, old_points = get_user(
+    tinkies, old_points, last_tinky = get_user(
         user.id,
         user.first_name or "Fairy"
     )
 
-    old_level = get_level(old_tinkies)
-    new_tinkies = old_tinkies + 1
+    now = time.time()
+
+    remaining = COOLDOWN - (
+        now - last_tinky
+    )
+
+    if remaining > 0:
+        minutes = int(remaining // 60)
+        seconds = int(remaining % 60)
+
+        await update.message.reply_text(
+            "⏳ هنوز نمی‌تونی تینکی بگی!\n\n"
+            "🧚‍♀️ تینکی بعدی:\n"
+            f"{minutes} دقیقه و {seconds} ثانیه دیگه"
+        )
+
+        return
+
+    old_level = get_level(tinkies)
+
+    new_tinkies = tinkies + 1
+
     new_level = get_level(new_tinkies)
 
     low, high = POINT_RANGES.get(
@@ -842,53 +884,73 @@ async def handle_message(
 
     new_points = old_points + earned_points
 
-    message = (
-        "🧚‍♀️✨ TINK TINK!\n\n"
-        f"💚 +{earned_points} Tinky Points\n"
-        f"💰 Total Points: {new_points:,}"
-    )
+    bonus = 0
 
     if new_level > old_level:
-        bonus = 0
-
-        for current_level in range(
+        for level in range(
             old_level + 1,
             new_level + 1
         ):
             bonus += LEVEL_BONUSES.get(
-                current_level,
+                level,
                 3000
             )
 
         new_points += bonus
 
-        message = (
-            "🧚‍♀️✨ TINK TINK!\n\n"
-            f"💚 +{earned_points} Tinky Points\n"
-            f"🎁 +{bonus:,} Level Up Bonus\n\n"
-            f"💰 Total Points: {new_points:,}\n\n"
-            "🎉🎉 LEVEL UP! 🎉🎉\n"
-            f"🌟 Level {new_level}!"
-        )
-
     save_user(
         user.id,
         user.first_name or "Fairy",
         new_tinkies,
-        new_points
+        new_points,
+        now
     )
 
+    if new_level > old_level:
+        message = (
+            "🧚‍♀️✨ TINK TINK! ✨🧚‍♀️\n\n"
+            f"💚 +{format_number(earned_points)} امتیاز تینکی\n"
+            f"🎁 +{format_number(bonus)} جایزه ارتقای سطح\n\n"
+            "🌟 LEVEL UP!\n"
+            f"✨ سطح جدید: {new_level}\n\n"
+            f"💰 موجودی: {format_number(new_points)} امتیاز\n\n"
+            "⏳ تینکی بعدی: ۴ دقیقه دیگه"
+        )
+
+    else:
+        message = (
+            "🧚‍♀️✨ TINK TINK! ✨🧚‍♀️\n\n"
+            f"💚 +{format_number(earned_points)} امتیاز تینکی\n\n"
+            f"💰 موجودی: {format_number(new_points)} امتیاز\n\n"
+            "⏳ تینکی بعدی: ۴ دقیقه دیگه"
+        )
+
     await update.message.reply_text(message)
+
+
+app_server = Flask(__name__)
+
+
+@app_server.route("/")
+def home():
+    return "Tinker Bell Bot is running!"
+
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    app_server.run(
+        host="0.0.0.0",
+        port=port
+    )
+
 
 def main():
     setup_database()
 
-    health_thread = Thread(
-        target=run_health_server,
+    Thread(
+        target=run_server,
         daemon=True
-    )
-
-    health_thread.start()
+    ).start()
 
     app = (
         Application
@@ -920,6 +982,13 @@ def main():
 
     app.add_handler(
         CommandHandler(
+            "myfairies",
+            my_fairies
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
             "collect",
             collect
         )
@@ -927,8 +996,15 @@ def main():
 
     app.add_handler(
         CommandHandler(
-            "myfairies",
-            my_fairies
+            "buy",
+            buy_fairy
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "upgrade",
+            upgrade_fairy
         )
     )
 
@@ -939,9 +1015,12 @@ def main():
         )
     )
 
-    print("🧚‍♀️ Tinker Bell Bot is running!")
+    print(
+        "🧚‍♀️ Tinker Bell Bot is running!"
+    )
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
