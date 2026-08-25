@@ -3,6 +3,9 @@ import random
 import os
 import time
 
+from threading import Thread
+from flask import Flask
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -119,11 +122,27 @@ PRODUCTION = {
 MAX_FAIRY_LEVEL = 25
 MAX_OFFLINE_SECONDS = 24 * 60 * 60
 
+health_app = Flask(__name__)
+
+@health_app.route("/")
+def health():
+    return "Tinker Bell Bot is running!"
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    health_app.run(
+        host="0.0.0.0",
+        port=port
+    )
+
 def get_level(tinkies):
     return (tinkies // 25) + 1
 
 def get_production(level):
-    return PRODUCTION.get(level, PRODUCTION[MAX_FAIRY_LEVEL])
+    return PRODUCTION.get(
+        level,
+        PRODUCTION[MAX_FAIRY_LEVEL]
+    )
 
 def get_capacity(level):
     return 10000 * level
@@ -149,7 +168,7 @@ def setup_database():
             user_id INTEGER NOT NULL,
             fairy_name TEXT NOT NULL,
             level INTEGER DEFAULT 1,
-            last_collect INTEGER NOT NULL,
+            last_collect INTEGER DEFAULT 0,
             UNIQUE(user_id, fairy_name)
         )
     """)
@@ -197,9 +216,15 @@ def get_user(user_id, name):
         user = (0, 0)
 
     connection.close()
+
     return user
 
-def save_user(user_id, name, tinkies, points):
+def save_user(
+    user_id,
+    name,
+    tinkies,
+    points
+):
     connection = sqlite3.connect(DB)
 
     connection.execute(
@@ -238,6 +263,7 @@ def get_user_fairies(user_id):
     ).fetchall()
 
     connection.close()
+
     return fairies
 
 def has_fairy(user_id, fairy_name):
@@ -257,9 +283,14 @@ def has_fairy(user_id, fairy_name):
     ).fetchone()
 
     connection.close()
+
     return result is not None
 
-def get_pending_for_fairy(fairy_name, level, last_collect):
+def get_pending_for_fairy(
+    fairy_name,
+    level,
+    last_collect
+):
     now = int(time.time())
 
     elapsed = max(
@@ -389,6 +420,7 @@ async def collect(update: Update):
 
 async def fairies(update: Update):
     user = update.effective_user
+
     owned = {
         fairy_name: level
         for fairy_name, level, last_collect
@@ -420,7 +452,10 @@ async def fairies(update: Update):
 
     await update.message.reply_text(message)
 
-async def buy_fairy(update: Update, fairy_name):
+async def buy_fairy(
+    update: Update,
+    fairy_name
+):
     user = update.effective_user
 
     if fairy_name not in FAIRIES:
@@ -434,7 +469,10 @@ async def buy_fairy(update: Update, fairy_name):
         user.first_name or "Fairy"
     )
 
-    if has_fairy(user.id, fairy_name):
+    if has_fairy(
+        user.id,
+        fairy_name
+    ):
         await update.message.reply_text(
             f"🧚‍♀️ تو قبلاً {fairy_name} رو داری!\n\n"
             "📈 برای ارتقاش از «ارتقا» استفاده کن."
@@ -508,7 +546,10 @@ async def buy_fairy(update: Update, fairy_name):
         f"💚 Remaining: {new_points:,} TP"
     )
 
-async def upgrade_fairy(update: Update, fairy_name):
+async def upgrade_fairy(
+    update: Update,
+    fairy_name
+):
     user = update.effective_user
 
     connection = sqlite3.connect(DB)
@@ -696,7 +737,10 @@ async def my_fairies(update: Update):
 
     await update.message.reply_text(message)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     await update.message.reply_text(
         "🧚‍♀️✨ سلام! من Tinker Bell هستم!\n\n"
         "🔔 با گفتن «تینک» Tinkies و Tinky Points بگیر.\n"
@@ -712,7 +756,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Fairy بعدی باز می‌شه!"
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     if not update.message:
         return
 
@@ -721,19 +768,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.casefold().strip()
 
-    if text in ["پروفایل", "تینکیم"]:
+    if text in [
+        "پروفایل",
+        "تینکیم"
+    ]:
         await send_profile(update)
         return
 
-    if text in ["پری ها", "پریها", "پری", "fairies"]:
+    if text in [
+        "پری ها",
+        "پریها",
+        "پری",
+        "fairies"
+    ]:
         await fairies(update)
         return
 
-    if text in ["جمع کن", "collect", "جمع"]:
+    if text in [
+        "جمع کن",
+        "collect",
+        "جمع"
+    ]:
         await collect(update)
         return
 
-    if text in ["پری های من", "پریهام", "my fairies"]:
+    if text in [
+        "پری های من",
+        "پریهام",
+        "my fairies"
+    ]:
         await my_fairies(update)
         return
 
@@ -819,6 +882,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     setup_database()
+
+    health_thread = Thread(
+        target=run_health_server,
+        daemon=True
+    )
+
+    health_thread.start()
 
     app = (
         Application
