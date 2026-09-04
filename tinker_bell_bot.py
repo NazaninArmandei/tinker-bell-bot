@@ -36,64 +36,71 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is missing.")
 
 COOLDOWN = 4 * 60
-MAX_LEVEL = 25
 
 FAIRIES = [
     {
         "name": "Tinker Bell",
         "talent": "Tinker",
         "price": 500,
-        "production": 1,
-        "capacity": 1000
+        "production": 0.10,
+        "capacity": 1000,
+        "max_level": 5
     },
     {
         "name": "Silvermist",
         "talent": "Water",
         "price": 5000,
-        "production": 2,
-        "capacity": 5000
+        "production": 0.20,
+        "capacity": 5000,
+        "max_level": 10
     },
     {
         "name": "Rosetta",
         "talent": "Garden",
         "price": 25000,
-        "production": 4,
-        "capacity": 15000
+        "production": 0.40,
+        "capacity": 15000,
+        "max_level": 15
     },
     {
         "name": "Fawn",
         "talent": "Animal",
         "price": 100000,
-        "production": 8,
-        "capacity": 40000
+        "production": 0.80,
+        "capacity": 40000,
+        "max_level": 20
     },
     {
         "name": "Iridessa",
         "talent": "Light",
         "price": 400000,
-        "production": 15,
-        "capacity": 100000
+        "production": 1.50,
+        "capacity": 100000,
+        "max_level": 25
     },
     {
         "name": "Vidia",
         "talent": "Fast Flying",
         "price": 1500000,
-        "production": 30,
-        "capacity": 250000
+        "production": 3.00,
+        "capacity": 250000,
+        "max_level": 30
     },
     {
         "name": "Periwinkle",
         "talent": "Frost",
         "price": 5000000,
-        "production": 60,
-        "capacity": 600000
+        "production": 6.00,
+        "capacity": 600000,
+        "max_level": 35
     },
     {
         "name": "Zarina",
         "talent": "Pixie Dust",
         "price": 15000000,
-        "production": 120,
-        "capacity": 1500000
+        "production": 12.00,
+        "capacity": 1500000,
+        "max_level": 40
     }
 ]
 
@@ -165,7 +172,13 @@ def setup_database():
 
 
 def format_number(number):
-    return f"{int(number):,}"
+    if number is None:
+        return "0"
+
+    if abs(number - int(number)) < 0.001:
+        return f"{int(number):,}"
+
+    return f"{number:,.2f}"
 
 
 def get_user(user_id, name):
@@ -333,13 +346,15 @@ def add_fairy(user_id, fairy_index):
         connection.close()
 
 
+def get_max_level(fairy_index):
+    return FAIRIES[fairy_index]["max_level"]
+
+
 def get_production(fairy_index, level):
     base = FAIRIES[fairy_index]["production"]
 
-    return int(
-        base * (
-            1 + (level - 1) * 0.35
-        )
+    return base * (
+        1 + (level - 1) * 0.35
     )
 
 
@@ -429,12 +444,13 @@ def update_all_fairies(user_id):
 def get_level(tinkies):
     return min(
         (tinkies // 25) + 1,
-        MAX_LEVEL
+        25
     )
 
 
 def get_tinky_reward(level):
     base_reward = random.randint(5, 15)
+
     level_bonus = (level - 1) * 2
 
     return base_reward + level_bonus
@@ -451,27 +467,27 @@ def main_menu():
     keyboard = [
         [
             InlineKeyboardButton(
-                "👤 پروفایل",
+                "🌸 پروفایل من",
                 callback_data="profile"
             ),
             InlineKeyboardButton(
-                "🧚‍♀️ پری‌ها",
+                "🛍️ فروشگاه پری‌ها",
                 callback_data="fairies"
             )
         ],
         [
             InlineKeyboardButton(
-                "🧚‍♀️ پری‌های من",
+                "🧚 پری‌های من",
                 callback_data="my_fairies"
             ),
             InlineKeyboardButton(
-                "💚 جمع کردن",
+                "💚 جمع‌آوری امتیاز",
                 callback_data="collect"
             )
         ],
         [
             InlineKeyboardButton(
-                "📈 ارتقای پری",
+                "✨ ارتقای پری‌ها",
                 callback_data="upgrade_menu"
             )
         ]
@@ -516,18 +532,23 @@ async def start(
         update,
         "🧚‍♀️✨ تینکر بل ✨🧚‍♀️\n\n"
         "سلام پری کوچولو! 🌸\n"
-        "به سرزمین پری‌ها خوش اومدی! 🧚‍♀️🌿\n\n"
+        "به سرزمین پری‌ها خوش اومدی! 🌿\n\n"
         "🔔 با گفتن «تینک» می‌تونی تینکی و امتیاز تینکی بگیری.\n\n"
         "💚 با امتیازهای تینکی می‌تونی:\n\n"
         "🧚‍♀️ پری بخری\n"
-        "📈 پری‌هات رو تا سطح ۲۵ ارتقا بدی\n"
+        "📈 پری‌هات رو ارتقا بدی\n"
         "⚡ از پری‌هات امتیاز جمع کنی\n"
         "📦 ظرفیت پری‌هات رو افزایش بدی\n"
-        "🔓 بعد از رسیدن اولین پری به سطح ۲۵، پری بعدی رو آزاد کنی\n\n"
-        "✨ هر پری:\n"
-        "🌿 یک استعداد مخصوص داره\n"
-        "⚡ در هر ثانیه امتیاز تولید می‌کنه\n"
-        "📦 ظرفیت مشخصی برای ذخیره امتیاز داره\n\n"
+        "🔓 پری‌های جدید رو آزاد کنی\n\n"
+        "✨ سقف هر پری متفاوته:\n"
+        "🧚‍♀️ تینکر بل: ۵ لول\n"
+        "💧 سیلرمِیست: ۱۰ لول\n"
+        "🌹 روزتا: ۱۵ لول\n"
+        "🦌 فاون: ۲۰ لول\n"
+        "☀️ اریدسا: ۲۵ لول\n"
+        "💨 ویدیا: ۳۰ لول\n"
+        "❄️ پری‌وینکل: ۳۵ لول\n"
+        "✨ زارینا: ۴۰ لول\n\n"
         "🌸 آماده‌ای وارد سرزمین پری‌ها بشی؟\n\n"
         "✨ بگو «تینک» تا شروع کنیم! ✨",
         main_menu()
@@ -547,7 +568,7 @@ async def profile(update: Update):
     await send_reply(
         update,
         "🧚‍♀️✨ پروفایل تینکی ✨🧚‍♀️\n\n"
-        f"🌟 سطح: {level}\n"
+        f"🌟 سطح: {level}/25\n"
         f"🔔 تینکی‌ها: {tinkies}\n"
         f"💚 امتیاز تینکی: "
         f"{format_number(points)}",
@@ -579,16 +600,20 @@ async def fairies(update: Update):
     if next_index > 0:
         previous = owned[-1]
 
-        if previous[1] < MAX_LEVEL:
+        previous_max_level = get_max_level(
+            previous[0]
+        )
+
+        if previous[1] < previous_max_level:
             await send_reply(
                 update,
                 "🔒 پری بعدی هنوز قفل است!\n\n"
                 f"🧚‍♀️ پری فعلی: "
                 f"{FAIRIES[previous[0]]['name']}\n"
                 f"🌟 سطح فعلی: "
-                f"{previous[1]}/{MAX_LEVEL}\n\n"
+                f"{previous[1]}/{previous_max_level}\n\n"
                 "برای باز شدن پری بعدی، "
-                "پری فعلی را به سطح ۲۵ برسان.",
+                "پری فعلی را به آخرین لولش برسون.",
                 main_menu()
             )
             return
@@ -604,7 +629,7 @@ async def fairies(update: Update):
         ],
         [
             InlineKeyboardButton(
-                "🔙 منوی اصلی",
+                "🏡 بازگشت به خانه",
                 callback_data="menu"
             )
         ]
@@ -612,9 +637,10 @@ async def fairies(update: Update):
 
     await send_reply(
         update,
-        "🧚‍♀️✨ فروشگاه پری‌ها ✨🧚‍♀️\n\n"
+        "🛍️✨ فروشگاه پری‌ها ✨🛍️\n\n"
         f"🧚‍♀️ {fairy['name']}\n"
         f"🌿 استعداد: {fairy['talent']}\n\n"
+        f"🌟 حداکثر لول: {fairy['max_level']}\n"
         f"💰 قیمت: "
         f"{format_number(fairy['price'])} امتیاز\n"
         f"⚡ تولید اولیه: "
@@ -657,6 +683,10 @@ async def my_fairies(update: Update):
 
         fairy = FAIRIES[fairy_index]
 
+        max_level = get_max_level(
+            fairy_index
+        )
+
         production = get_production(
             fairy_index,
             level
@@ -670,7 +700,7 @@ async def my_fairies(update: Update):
         message += (
             f"🧚‍♀️ {fairy['name']}\n"
             f"🌿 استعداد: {fairy['talent']}\n"
-            f"🌟 سطح: {level}/{MAX_LEVEL}\n"
+            f"🌟 سطح: {level}/{max_level}\n"
             f"⚡ تولید: "
             f"{format_number(production)} در ثانیه\n"
             f"📦 ظرفیت: "
@@ -804,25 +834,28 @@ async def upgrade_menu(update: Update):
         last_collection
     ) in owned:
 
+        max_level = get_max_level(
+            fairy_index
+        )
+
         buttons.append([
             InlineKeyboardButton(
-                f"📈 "
-                f"{FAIRIES[fairy_index]['name']} "
-                f"— {level}/{MAX_LEVEL}",
+                f"✨ {FAIRIES[fairy_index]['name']} "
+                f"• {level}/{max_level}",
                 callback_data=f"upgrade_{fairy_index}"
             )
         ])
 
     buttons.append([
         InlineKeyboardButton(
-            "🔙 منوی اصلی",
+            "🏡 منوی اصلی",
             callback_data="menu"
         )
     ])
 
     await send_reply(
         update,
-        "🧚‍♀️✨ انتخاب پری برای ارتقا ✨🧚‍♀️\n\n"
+        "✨🧚‍♀️ ارتقای پری‌ها 🧚‍♀️✨\n\n"
         "پری موردنظرت رو انتخاب کن:",
         InlineKeyboardMarkup(buttons)
     )
@@ -860,12 +893,16 @@ async def upgrade_fairy(
 
     fairy = FAIRIES[fairy_index]
 
-    if level >= MAX_LEVEL:
+    max_level = get_max_level(
+        fairy_index
+    )
+
+    if level >= max_level:
         await send_reply(
             update,
             "🎉✨ MAX LEVEL! ✨🎉\n\n"
             f"🧚‍♀️ {fairy['name']}\n"
-            f"🌟 سطح: {MAX_LEVEL}/{MAX_LEVEL}"
+            f"🌟 سطح: {max_level}/{max_level}"
         )
         return
 
@@ -902,7 +939,7 @@ async def upgrade_fairy(
     keyboard = [
         [
             InlineKeyboardButton(
-                "⬆️ ارتقا",
+                "✨ ارتقا",
                 callback_data=f"confirm_upgrade_{fairy_index}"
             )
         ],
@@ -918,7 +955,7 @@ async def upgrade_fairy(
         update,
         "🧚‍♀️✨ ارتقای پری ✨🧚‍♀️\n\n"
         f"🔧 {fairy['name']}\n\n"
-        f"🌟 سطح فعلی: {level}/{MAX_LEVEL}\n\n"
+        f"🌟 سطح فعلی: {level}/{max_level}\n\n"
         f"⚡ تولید فعلی:\n"
         f"{format_number(production)} امتیاز در ثانیه\n"
         f"⬆️ تولید بعدی:\n"
@@ -966,7 +1003,11 @@ async def confirm_upgrade(
 
     level, stored, last_collection = fairy_data
 
-    if level >= MAX_LEVEL:
+    max_level = get_max_level(
+        fairy_index
+    )
+
+    if level >= max_level:
         await send_reply(
             update,
             "🎉✨ این پری به MAX LEVEL رسیده! ✨🎉"
@@ -1056,7 +1097,7 @@ async def confirm_upgrade(
     message = (
         "🧚‍♀️✨ ارتقا با موفقیت انجام شد! ✨🧚‍♀️\n\n"
         f"🔧 {fairy['name']}\n\n"
-        f"🌟 سطح جدید: {new_level}/{MAX_LEVEL}\n\n"
+        f"🌟 سطح جدید: {new_level}/{max_level}\n\n"
         f"⚡ تولید: "
         f"{format_number(production)} امتیاز در ثانیه\n"
         f"📦 ظرفیت: "
@@ -1064,19 +1105,20 @@ async def confirm_upgrade(
         f"💚 هزینه پرداخت‌شده:\n"
         f"{format_number(upgrade_cost)} امتیاز\n\n"
         f"💰 موجودی شما:\n"
-        f"{format_number(new_points)} امتیاز\n\n"
-        "🌸 پری شما قوی‌تر شد!"
+        f"{format_number(new_points)} امتیاز"
     )
 
     keyboard = []
 
-    if new_level == MAX_LEVEL:
+    if new_level == max_level:
         next_index = fairy_index + 1
 
         message += "\n\n🎉✨ MAX LEVEL! ✨🎉"
 
         if next_index < len(FAIRIES):
-            message += "\n\n🔓 پری بعدی برای خرید آزاد شد!"
+            message += (
+                "\n\n🔓 پری بعدی برای خرید آزاد شد!"
+            )
 
             keyboard.append([
                 InlineKeyboardButton(
@@ -1085,16 +1127,17 @@ async def confirm_upgrade(
                 )
             ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "📈 ارتقای بیشتر",
-            callback_data=f"upgrade_{fairy_index}"
-        )
-    ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton(
+                "✨ ارتقای بیشتر",
+                callback_data=f"upgrade_{fairy_index}"
+            )
+        ])
 
     keyboard.append([
         InlineKeyboardButton(
-            "🔙 منوی اصلی",
+            "🏡 منوی اصلی",
             callback_data="menu"
         )
     ])
@@ -1141,13 +1184,18 @@ async def buy_fairy(
     if next_index > 0:
         previous = owned[-1]
 
-        if previous[1] < MAX_LEVEL:
+        previous_max_level = get_max_level(
+            previous[0]
+        )
+
+        if previous[1] < previous_max_level:
             await send_reply(
                 update,
                 "🔒 پری بعدی هنوز قفل است!\n\n"
                 f"🧚‍♀️ "
                 f"{FAIRIES[previous[0]]['name']}\n"
-                f"🌟 سطح: {previous[1]}/{MAX_LEVEL}"
+                f"🌟 سطح: "
+                f"{previous[1]}/{previous_max_level}"
             )
             return
 
@@ -1184,7 +1232,7 @@ async def buy_fairy(
         "🧚‍♀️✨ پری جدید خریداری شد! ✨🧚‍♀️\n\n"
         f"🌸 {fairy['name']}\n"
         f"🌿 استعداد: {fairy['talent']}\n\n"
-        f"🌟 سطح: 1/{MAX_LEVEL}\n"
+        f"🌟 سطح: 1/{fairy['max_level']}\n"
         f"⚡ تولید: "
         f"{format_number(fairy['production'])} در ثانیه\n"
         f"📦 ظرفیت: "
@@ -1264,7 +1312,7 @@ async def handle_tinky(update: Update):
             f"🎁 +{format_number(bonus)} "
             "جایزه ارتقای سطح\n\n"
             "🌟 LEVEL UP!\n"
-            f"✨ سطح جدید: {new_level}\n\n"
+            f"✨ سطح جدید: {new_level}/25\n\n"
             f"💰 موجودی: "
             f"{format_number(new_points)} امتیاز\n\n"
             "⏳ تینکی بعدی: ۴ دقیقه دیگه"
@@ -1275,7 +1323,7 @@ async def handle_tinky(update: Update):
             "🧚‍♀️✨ TINK TINK! ✨🧚‍♀️\n\n"
             f"💚 +{format_number(earned_points)} "
             "امتیاز تینکی\n"
-            f"🌟 سطح فعلی: {new_level}\n\n"
+            f"🌟 سطح فعلی: {new_level}/25\n\n"
             f"💰 موجودی: "
             f"{format_number(new_points)} امتیاز\n\n"
             "⏳ تینکی بعدی: ۴ دقیقه دیگه"
@@ -1607,15 +1655,7 @@ def create_application():
 
 def main():
     logger.info(
-        "================================"
-    )
-
-    logger.info(
         "Starting Tinker Bell Bot..."
-    )
-
-    logger.info(
-        "================================"
     )
 
     setup_database()
