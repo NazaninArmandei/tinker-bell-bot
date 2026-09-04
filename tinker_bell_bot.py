@@ -571,8 +571,7 @@ async def profile(update: Update):
         f"🌟 سطح: {level}/25\n"
         f"🔔 تینکی‌ها: {tinkies}\n"
         f"💚 امتیاز تینکی: "
-        f"{format_number(points)}",
-        main_menu()
+        f"{format_number(points)}"
     )
 
 
@@ -592,8 +591,7 @@ async def fairies(update: Update):
         await send_reply(
             update,
             "🧚‍♀️✨ فروشگاه پری‌ها ✨🧚‍♀️\n\n"
-            "🎉 همه پری‌ها رو آزاد کردی!",
-            main_menu()
+            "🎉 همه پری‌ها رو آزاد کردی!"
         )
         return
 
@@ -613,8 +611,7 @@ async def fairies(update: Update):
                 f"🌟 سطح فعلی: "
                 f"{previous[1]}/{previous_max_level}\n\n"
                 "برای باز شدن پری بعدی، "
-                "پری فعلی را به آخرین لولش برسون.",
-                main_menu()
+                "پری فعلی را به آخرین لولش برسون."
             )
             return
 
@@ -663,8 +660,7 @@ async def my_fairies(update: Update):
             update,
             "🧚‍♀️✨ پری‌های من ✨🧚‍♀️\n\n"
             "هنوز پری‌ای نداری! 🌸\n\n"
-            "💚 از فروشگاه اولین پریت رو بخر.",
-            main_menu()
+            "💚 از فروشگاه اولین پریت رو بخر."
         )
         return
 
@@ -711,8 +707,7 @@ async def my_fairies(update: Update):
 
     await send_reply(
         update,
-        message,
-        main_menu()
+        message
     )
 
 
@@ -725,8 +720,7 @@ async def collect(update: Update):
         await send_reply(
             update,
             "💚 هنوز پری‌ای نداری که ازش "
-            "امتیاز جمع کنی.",
-            main_menu()
+            "امتیاز جمع کنی."
         )
         return
 
@@ -796,8 +790,7 @@ async def collect(update: Update):
             "💚 هنوز امتیازی برای جمع کردن "
             "ذخیره نشده.\n\n"
             "⚡ چند لحظه صبر کن تا پری‌هات "
-            "امتیاز تولید کنن!",
-            main_menu()
+            "امتیاز تولید کنن!"
         )
         return
 
@@ -807,8 +800,7 @@ async def collect(update: Update):
         f"💚 +{format_number(total)} "
         "امتیاز تینکی\n\n"
         f"💰 موجودی: "
-        f"{format_number(new_points)}",
-        main_menu()
+        f"{format_number(new_points)}"
     )
 
 
@@ -820,8 +812,7 @@ async def upgrade_menu(update: Update):
     if not owned:
         await send_reply(
             update,
-            "🧚‍♀️ هنوز پری‌ای نداری که ارتقاش بدی!",
-            main_menu()
+            "🧚‍♀️ هنوز پری‌ای نداری که ارتقاش بدی!"
         )
         return
 
@@ -1227,6 +1218,15 @@ async def buy_fairy(
         last_tinky
     )
 
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🏡 منوی اصلی",
+                callback_data="menu"
+            )
+        ]
+    ])
+
     await send_reply(
         update,
         "🧚‍♀️✨ پری جدید خریداری شد! ✨🧚‍♀️\n\n"
@@ -1241,7 +1241,7 @@ async def buy_fairy(
         f"{format_number(fairy['price'])} امتیاز\n\n"
         f"💰 موجودی شما:\n"
         f"{format_number(new_points)} امتیاز",
-        main_menu()
+        keyboard
     )
 
 
@@ -1331,8 +1331,7 @@ async def handle_tinky(update: Update):
 
     await send_reply(
         update,
-        message,
-        main_menu()
+        message
     )
 
 
