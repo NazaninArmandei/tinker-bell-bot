@@ -788,10 +788,10 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT user_id, name, points
+                SELECT user_id, name, points, tinkies
                 FROM users
                 ORDER BY points DESC, user_id ASC
-                LIMIT 3
+                LIMIT 5
                 """
             )
             top_users = cur.fetchall()
@@ -810,15 +810,28 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-    medals = ["🥇 رتبه‌ی اول", "🥈 رتبه‌ی دوم", "🥉 رتبه‌ی سوم"]
+    medals = [
+        "🥇 رتبه‌ی اول",
+        "🥈 رتبه‌ی دوم",
+        "🥉 رتبه‌ی سوم",
+        "🏅 رتبه‌ی چهارم",
+        "🏅 رتبه‌ی پنجم",
+    ]
+
     top_lines = []
 
     for position, medal in enumerate(medals):
         if position < len(top_users):
             player = top_users[position]
-            top_lines.append(f"{medal}: {player['name'] or 'بازیکن'}")
+
+            top_lines.append(
+                f"{medal}\n"
+                f"👤 نام پری‌دار: {player['name'] or 'بازیکن'}\n"
+                f"💎 تینکی‌پوینت: {format_number(player['points'])}\n"
+                f"🧚🏻‍♀️ تینکی‌های فعلی: {format_number(player['tinkies'])}"
+            )
         else:
-            top_lines.append(f"{medal}: هنوز بازیکنی نیست")
+            top_lines.append(f"{medal}\nهنوز بازیکنی نیست")
 
     user_data = get_user(user.id)
     user_rank = rank_data["rank"] if rank_data else "؟"
@@ -826,12 +839,13 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🏆✨ برترین پری‌داران پیکسی هالو ✨🏆\n\n"
         "━━━━━━━━━━━━━━\n\n"
-        "🌟 اینجا جایگاه برترین بازیکن‌های سرزمین پری‌هاست!\n\n"
+        "🌟 اینجا جایگاه ۵ بازیکن برتر سرزمین پری‌هاست!\n\n"
         "🧚🏻‍♀️ هرکسی که تینکی‌پوینت بیشتری جمع کنه، به صدر جدول نزدیک‌تر می‌شه!\n\n"
-        + "\n".join(top_lines)
+        + "\n\n━━━━━━━━━━━━━━\n\n".join(top_lines)
         + "\n\n━━━━━━━━━━━━━━\n\n"
         f"💎 رتبه‌ی تو: {format_number(user_rank)}\n"
-        f"✨ تینکی‌پوینت تو: {format_number(user_data['points'])}\n\n"
+        f"✨ تینکی‌پوینت تو: {format_number(user_data['points'])}\n"
+        f"🧚🏻‍♀️ تینکی‌های فعلی تو: {format_number(user_data['tinkies'])}\n\n"
         "🍃 تلاش کن تا اسم تو هم بین برترین‌های پیکسی هالو بدرخشه! 🪄"
     )
 
