@@ -2,15 +2,13 @@ import os
 import time
 import random
 import logging
-from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
 from threading import Thread
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -24,12 +22,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 COOLDOWN = 240
-TEHRAN = ZoneInfo("Asia/Tehran")
 
 FAIRIES = [
     {"name": "تینکر بل", "talent": "اختراع", "price": 500, "production": 0.10, "capacity": 1000, "max_level": 5},
@@ -42,1378 +38,1095 @@ FAIRIES = [
     {"name": "زارینا", "talent": "استعداد ویژه", "price": 15000000, "production": 12.00, "capacity": 1500000, "max_level": 40},
 ]
 
-TALENTS = {
-    "اختراع": {"unlock": "ارتقای موفق ۵ پری", "target": 5, "stat": "upgrades", "weekly": "ارتقای موفق ۵ پری", "weekly_stat": "upgrades", "weekly_target": 5},
-    "آب": {"unlock": "۱۰ بار جمع‌آوری موفق", "target": 10, "stat": "collections", "weekly": "۱۰ بار جمع‌آوری", "weekly_stat": "collections", "weekly_target": 10},
-    "باغبانی": {"unlock": "۵ بار تینک موفق", "target": 5, "stat": "tinky", "weekly": "۵ بار تینک موفق", "weekly_stat": "tinky", "weekly_target": 5},
-    "حیوانات": {"unlock": "فعالیت موفق در ۵ روز متفاوت", "target": 5, "stat": "activity_days", "weekly": "فعالیت در ۵ روز متفاوت", "weekly_stat": "activity_days", "weekly_target": 5},
-    "نور": {"unlock": "تکمیل و دریافت پاداش ۱۰ مأموریت", "target": 10, "stat": "missions", "weekly": "تکمیل و دریافت ۱۰ مأموریت", "weekly_stat": "missions", "weekly_target": 10},
-    "پرواز سریع": {"unlock": "۱۵ فعالیت موفق", "target": 15, "stat": "activities", "weekly": "۱۵ فعالیت موفق", "weekly_stat": "activities", "weekly_target": 15},
-    "یخ": {"unlock": "تکمیل و دریافت پاداش ۵ مأموریت هفتگی", "target": 5, "stat": "weekly_missions", "weekly": "تکمیل ۵ مأموریت هفتگی", "weekly_stat": "weekly_missions", "weekly_target": 5},
-}
+PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
-DAILY_QUESTS = {
-    "daily_login": ("ورود روزانه", 1, 500, "login"),
-    "daily_tinky": ("تینک روزانه", 3, 1200, "tinky"),
-    "daily_collect": ("جمع‌آوری", 2, 1000, "collections"),
-    "daily_upgrade": ("مراقبت از پریان", 1, 1500, "upgrades"),
-    "daily_points": ("پیشرفت", 500, 2000, "points"),
-}
 
-WEEKLY_QUESTS = {
-    "weekly_tinky": ("پری پرتلاش", 20, 6000, "tinky"),
-    "weekly_collect": ("جمع‌آورنده", 10, 5000, "collections"),
-    "weekly_upgrade": ("استاد ارتقا", 3, 7000, "upgrades"),
-    "weekly_buy": ("کلکسیونر", 2, 6000, "buys"),
-    "weekly_points": ("پیشرفت بزرگ", 3000, 9000, "points"),
-}
+def get_db():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
-MILESTONE_REWARDS = {
-    2: 2000, 3: 3500, 4: 5000, 5: 8000, 6: 10000,
-    7: 12000, 8: 15000, 9: 18000, 10: 25000,
-    15: 35000, 20: 50000, 25: 70000, 30: 100000,
-    35: 130000, 40: 170000, 45: 220000, 50: 300000,
-}
+
+def init_db():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    name TEXT,
+                    tinkies INTEGER DEFAULT 0,
+                    points BIGINT DEFAULT 0,
+                    last_tinky DOUBLE PRECISION DEFAULT 0
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS fairies (
+                    user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                    fairy_index INTEGER,
+                    level INTEGER DEFAULT 1,
+                    stored_points DOUBLE PRECISION DEFAULT 0,
+                    last_collection DOUBLE PRECISION DEFAULT 0,
+                    PRIMARY KEY (user_id, fairy_index)
+                )
+            """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def format_number(number):
+    number = float(number)
+    if number >= 1_000_000_000:
+        result = f"{number / 1_000_000_000:.1f}B"
+    elif number >= 1_000_000:
+        result = f"{number / 1_000_000:.1f}M"
+    elif number >= 1_000:
+        result = f"{number / 1_000:.1f}K"
+    elif number.is_integer():
+        result = str(int(number))
+    else:
+        result = f"{number:.2f}".rstrip("0").rstrip(".")
+    return result.translate(PERSIAN_DIGITS)
+
+
+def format_decimal(number):
+    return f"{number:.2f}".translate(PERSIAN_DIGITS)
+
+
+def get_level(tinkies):
+    return min((tinkies // 25) + 1, 25)
+
+
+def get_production(fairy_index, level):
+    return FAIRIES[fairy_index]["production"] * (1 + (level - 1) * 0.35)
+
+
+def get_capacity(fairy_index, level):
+    return int(FAIRIES[fairy_index]["capacity"] * (1 + (level - 1) * 0.30))
+
+
+def get_upgrade_cost(fairy_index, level):
+    return int(FAIRIES[fairy_index]["price"] * (level ** 1.7))
+
+
+def ensure_user(user):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (user_id, name)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id)
+                DO UPDATE SET name = EXCLUDED.name
+                """,
+                (user.id, user.first_name or "بازیکن"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user(user_id):
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def get_owned_fairies(user_id):
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM fairies WHERE user_id = %s ORDER BY fairy_index",
+                (user_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def get_fairy(user_id, fairy_index):
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM fairies WHERE user_id = %s AND fairy_index = %s",
+                (user_id, fairy_index),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def update_user_points(user_id, amount):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET points = points + %s WHERE user_id = %s",
+                (amount, user_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_fairy_storage(user_id, fairy_index):
+    fairy_data = get_fairy(user_id, fairy_index)
+    if not fairy_data:
+        return None
+
+    now = time.time()
+    last_collection = fairy_data["last_collection"] or now
+    elapsed = max(0, now - last_collection)
+
+    production = get_production(fairy_index, fairy_data["level"])
+    capacity = get_capacity(fairy_index, fairy_data["level"])
+    stored = min(capacity, fairy_data["stored_points"] + elapsed * production)
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fairies
+                SET stored_points = %s, last_collection = %s
+                WHERE user_id = %s AND fairy_index = %s
+                """,
+                (stored, now, user_id, fairy_index),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fairy_data["stored_points"] = stored
+    fairy_data["last_collection"] = now
+    return fairy_data
+
+
+def update_all_fairies(user_id):
+    for fairy in get_owned_fairies(user_id):
+        update_fairy_storage(user_id, fairy["fairy_index"])
+
+
+def main_menu():
+    keyboard = [
+        [InlineKeyboardButton("🧚🏻‍♀️ پری‌های من", callback_data="my_fairies")],
+        [
+            InlineKeyboardButton("👤 پروفایل من", callback_data="profile"),
+            InlineKeyboardButton("🏆 لیدربرد", callback_data="leaderboard"),
+        ],
+        [
+            InlineKeyboardButton("✨ پری‌های سرزمین", callback_data="fairies"),
+            InlineKeyboardButton("💫 درباره‌ی ربات", callback_data="about"),
+        ],
+        [InlineKeyboardButton("📜 راهنمای بازی", callback_data="guide")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def send_main_menu(message):
+    text = (
+        "🧚🏻‍♀️✨ منوی اصلی پیکسی هالو ✨🧚🏻‍♀️\n\n"
+        "🌸 به سرزمین پری‌ها خوش اومدی!\n\n"
+        "🍃 از کجا می‌خوای ماجراجوییت رو ادامه بدی؟\n\n"
+        "━━━━━━━━━━━━━━"
+    )
+    await message.reply_text(text, reply_markup=main_menu())
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_user(update.effective_user)
+
+    text = (
+        "🧚🏻‍♀️✨ به پیکسی هالو خوش اومدی! ✨🧚🏻‍♀️\n\n"
+        "🌸 به سرزمین اسرارآمیز پری‌ها خوش اومدی!\n\n"
+        "جایی که گرد جادویی در هوا می‌درخشه، هر پری استعداد خاص خودش رو داره و ماجراجویی تو تازه شروع شده! 🪄💫\n\n"
+        "🧚🏻‍♀️ اینجا می‌تونی:\n\n"
+        "୨ৎ پری‌های محبوبت رو جمع‌آوری کنی\n"
+        "୨ৎ پری‌های جدید رو آزاد کنی\n"
+        "୨ৎ پری‌هات رو ارتقا بدی\n"
+        "୨ৎ تینکی‌پوینت جمع کنی و به ثروتمندترین پری‌دار سرزمین تبدیل بشی\n"
+        "୨ৎ با بقیه‌ی بازیکن‌ها رقابت کنی و به صدر جدول برسی!\n\n"
+        "🍃 هر پری داستان خودش رو داره...\n"
+        "✨ و این تویی که قراره داستان خودت رو بسازی!\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "💌 آماده‌ای جادوی خودت رو شروع کنی؟\n\n"
+        "🪄 کافیه بگی «تینک» تا جادوی پیکسی هالو برات شروع بشه! ✨🍃\n\n"
+        "🦋 بذار جادو آغاز بشه... 🦋"
+    )
+    await update.message.reply_text(text)
+
+
+async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user)
+
+    data = get_user(user.id)
+    owned = get_owned_fairies(user.id)
+
+    text = (
+        "🧚🏻‍♀️✨ شناسنامه‌ی پری‌زاد تو ✨🧚🏻‍♀️\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"👤 نام ماجراجو: {data['name'] or 'بازیکن'}\n"
+        f"🌟 سطح جادویی: {format_number(get_level(data['tinkies']))}\n"
+        f"🧚🏻‍♀️ پری‌های همراه: {format_number(len(owned))}\n"
+        f"💎 کل تینکی‌پوینت‌ها: {format_number(data['points'])}\n"
+        f"🪄 تعداد دفعات تینک: {format_number(data['tinkies'])}\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🍃 هر روز یه قدم به دنیای جادو نزدیک‌تر می‌شی! ✨💚"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text)
+    else:
+        await update.message.reply_text(text)
+
+
+def next_fairy_unlocked(user_id, index):
+    if index == 0:
+        return True
+
+    previous = get_fairy(user_id, index - 1)
+    if not previous:
+        return False
+
+    return previous["level"] >= FAIRIES[index - 1]["max_level"]
+
+
+async def show_fairies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user)
+
+    owned_indices = {
+        fairy["fairy_index"]
+        for fairy in get_owned_fairies(user.id)
+    }
+
+    lines = [
+        "🧚🏻‍♀️ پری‌های پیکسی هالو",
+        "",
+        "✨ پری موردعلاقه‌ات رو انتخاب کن و به جمع پری‌هات اضافه کن!",
+        "",
+        "━━━━━━━━━━━━━━",
+        "",
+    ]
+    keyboard = []
+
+    for index, fairy in enumerate(FAIRIES):
+        lines.extend([
+            f"🧚🏻‍♀️ {fairy['name']}",
+            f"🌿 استعداد: {fairy['talent']}",
+            f"💰 قیمت: {format_number(fairy['price'])} تینکی‌پوینت",
+            f"⚡ تولید: {format_decimal(fairy['production'])} امتیاز در ثانیه",
+            "",
+            "━━━━━━━━━━━━━━",
+            "",
+        ])
+
+        if index in owned_indices:
+            label = f"✅ {fairy['name']} — خریداری شده"
+            callback = f"owned_{index}"
+        else:
+            label = f"🛒 خرید {fairy['name']}"
+            callback = f"buy_{index}"
+
+        keyboard.append([
+            InlineKeyboardButton(label, callback_data=callback)
+        ])
+
+    lines.append("🍃 با خرید هر پری، قدرت جمع‌آوری تینکی‌پوینت‌هات رو بیشتر کن! 💎")
+    keyboard.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu")])
+
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_buy_confirmation(update, context, index):
+    user = update.effective_user
+
+    if index < 0 or index >= len(FAIRIES):
+        await update.callback_query.answer("این پری وجود نداره!", show_alert=True)
+        return
+
+    if get_fairy(user.id, index):
+        await update.callback_query.answer("این پری رو قبلاً خریدی!", show_alert=True)
+        return
+
+    if not next_fairy_unlocked(user.id, index):
+        await update.callback_query.answer(
+            "برای آزاد کردن این پری، اول پری قبلی رو به حداکثر سطح برسون!",
+            show_alert=True,
+        )
+        return
+
+    fairy = FAIRIES[index]
+    user_data = get_user(user.id)
+
+    text = (
+        "🧚🏻‍♀️ خرید پری\n\n"
+        f"✨ پری انتخاب‌شده: {fairy['name']}\n"
+        f"💰 قیمت: {format_number(fairy['price'])} تینکی‌پوینت\n"
+        f"💎 موجودی تو: {format_number(user_data['points'])}\n\n"
+        "🪄 می‌خوای این پری رو به جمع پری‌هات اضافه کنی؟"
+    )
+
+    keyboard = [[
+        InlineKeyboardButton("✅ بله", callback_data=f"yes_buy_{index}"),
+        InlineKeyboardButton("❌ خیر", callback_data=f"no_buy_{index}"),
+    ]]
+
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def confirm_buy_fairy(update, context, index):
+    user = update.effective_user
+    ensure_user(user)
+
+    if index < 0 or index >= len(FAIRIES):
+        await update.callback_query.answer("این پری وجود نداره!", show_alert=True)
+        return
+
+    fairy = FAIRIES[index]
+    conn = get_db()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT points FROM users WHERE user_id = %s FOR UPDATE",
+                (user.id,),
+            )
+            row = cur.fetchone()
+
+            if not row or row[0] < fairy["price"]:
+                conn.rollback()
+                await update.callback_query.answer(
+                    "تینکی‌پوینت کافی نداری!",
+                    show_alert=True,
+                )
+                return
+
+            cur.execute(
+                "SELECT 1 FROM fairies WHERE user_id = %s AND fairy_index = %s",
+                (user.id, index),
+            )
+            if cur.fetchone():
+                conn.rollback()
+                await update.callback_query.answer(
+                    "این پری رو قبلاً خریدی!",
+                    show_alert=True,
+                )
+                return
+
+            if not next_fairy_unlocked(user.id, index):
+                conn.rollback()
+                await update.callback_query.answer(
+                    "این پری هنوز آزاد نشده!",
+                    show_alert=True,
+                )
+                return
+
+            cur.execute(
+                "UPDATE users SET points = points - %s WHERE user_id = %s",
+                (fairy["price"], user.id),
+            )
+            cur.execute(
+                """
+                INSERT INTO fairies
+                    (user_id, fairy_index, level, stored_points, last_collection)
+                VALUES (%s, %s, 1, 0, %s)
+                """,
+                (user.id, index, time.time()),
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    remaining = get_user(user.id)["points"]
+
+    text = (
+        "🎉🧚🏻‍♀️ پری جدید به جمع تو پیوست!\n\n"
+        f"✨ {fairy['name']} حالا یکی از پری‌های توئه!\n\n"
+        f"⚡ تولید: {format_decimal(fairy['production'])} امتیاز در ثانیه\n"
+        f"💎 موجودی باقی‌مانده: {format_number(remaining)} تینکی‌پوینت\n\n"
+        "🍃 ماجراجویی‌تون تازه شروع شده! 💚"
+    )
+
+    await update.callback_query.answer("پری به جمع تو پیوست! 🧚🏻‍♀️")
+    await update.callback_query.message.reply_text(text)
+
+
+async def cancel_buy_fairy(update, context):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "🍃 خرید پری لغو شد!\n\n"
+        "🧚🏻‍♀️ اشکالی نداره! هر وقت خواستی می‌تونی برگردی و پری موردعلاقه‌ات رو انتخاب کنی. 💚✨"
+    )
+
+
+async def show_my_fairies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user)
+
+    update_all_fairies(user.id)
+    owned = get_owned_fairies(user.id)
+
+    if not owned:
+        text = (
+            "🧚🏻‍♀️ پری‌های من\n\n"
+            "━━━━━━━━━━━━━━\n\n"
+            "🍃 هنوز هیچ پری‌ای همراهت نیست!\n\n"
+            "✨ به بخش «🧚 پری‌ها» سر بزن و اولین پریت رو به سرزمین جادویی خودت بیار! 💚\n\n"
+            "━━━━━━━━━━━━━━"
+        )
+
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text)
+        else:
+            await update.message.reply_text(text)
+        return
+
+    lines = ["🧚🏻‍♀️ پری‌های من", "", "━━━━━━━━━━━━━━", ""]
+
+    for fairy in owned:
+        index = fairy["fairy_index"]
+        data = FAIRIES[index]
+
+        lines.extend([
+            f"✨ {data['name']}",
+            f"🌟 سطح: {format_number(fairy['level'])}/{format_number(data['max_level'])}",
+            f"⚡ تولید امتیاز: {format_decimal(get_production(index, fairy['level']))} در ثانیه",
+            f"📦 امتیاز ذخیره‌شده: {format_number(fairy['stored_points'])}/{format_number(get_capacity(index, fairy['level']))}",
+            "",
+            "━━━━━━━━━━━━━━",
+            "",
+        ])
+
+    lines.append("🍃 پری‌هات رو ارتقا بده تا امتیاز بیشتری برات جمع کنن! 💎")
+
+    keyboard = [[
+        InlineKeyboardButton("⬆️ آپگرید", callback_data="upgrade_menu"),
+        InlineKeyboardButton("💎 جمع کردن", callback_data="collect"),
+    ]]
+
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text("\n".join(lines), reply_markup=markup)
+    else:
+        await update.message.reply_text("\n".join(lines), reply_markup=markup)
+
+
+async def collect_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user)
+
+    update_all_fairies(user.id)
+    owned = get_owned_fairies(user.id)
+
+    if not owned:
+        text = "🍃 هنوز پری‌ای نداری که برات تینکی‌پوینت جمع کنه!"
+    else:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT points FROM users WHERE user_id = %s FOR UPDATE",
+                    (user.id,),
+                )
+
+                total = 0.0
+
+                for fairy in owned:
+                    cur.execute(
+                        """
+                        SELECT stored_points
+                        FROM fairies
+                        WHERE user_id = %s AND fairy_index = %s
+                        FOR UPDATE
+                        """,
+                        (user.id, fairy["fairy_index"]),
+                    )
+                    row = cur.fetchone()
+                    amount = row[0] if row else 0.0
+                    total += amount
+
+                whole_total = int(total)
+
+                for fairy in owned:
+                    cur.execute(
+                        """
+                        UPDATE fairies
+                        SET stored_points = 0, last_collection = %s
+                        WHERE user_id = %s AND fairy_index = %s
+                        """,
+                        (time.time(), user.id, fairy["fairy_index"]),
+                    )
+
+                cur.execute(
+                    "UPDATE users SET points = points + %s WHERE user_id = %s",
+                    (whole_total, user.id),
+                )
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        if whole_total > 0:
+            text = (
+                "💎✨ جمع‌آوری تینکی‌پوینت انجام شد!\n\n"
+                f"🍃 امتیاز جمع‌آوری‌شده: +{format_number(whole_total)} تینکی‌پوینت"
+            )
+        else:
+            text = (
+                "🍃 فعلاً امتیازی برای جمع‌آوری نداری!\n\n"
+                "کمی صبر کن تا پری‌هات برات تینکی‌پوینت تولید کنن. 💚"
+            )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text)
+    else:
+        await update.message.reply_text(text)
+
+
+async def show_upgrade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    owned = get_owned_fairies(user.id)
+    keyboard = []
+
+    if not owned:
+        text = "⬆️ هنوز هیچ پری‌ای نداری که ارتقاش بدی!"
+    else:
+        text = "⬆️✨ پری‌ای رو که می‌خوای ارتقا بدی انتخاب کن:"
+
+        for fairy in owned:
+            index = fairy["fairy_index"]
+            data = FAIRIES[index]
+
+            if fairy["level"] < data["max_level"]:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"🧚🏻‍♀️ {data['name']} — سطح {fairy['level']}",
+                        callback_data=f"upgrade_{index}",
+                    )
+                ])
+
+        if not keyboard:
+            text = "✨ همه‌ی پری‌هات به حداکثر سطح خودشون رسیدن!"
+
+    keyboard.append([
+        InlineKeyboardButton("🔙 بازگشت به پری‌های من", callback_data="my_fairies")
+    ])
+
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_upgrade(update, context, index):
+    user = update.effective_user
+    fairy = get_fairy(user.id, index)
+
+    if not fairy:
+        await update.callback_query.answer("این پری رو نداری!", show_alert=True)
+        return
+
+    data = FAIRIES[index]
+    current_level = fairy["level"]
+
+    if current_level >= data["max_level"]:
+        await update.callback_query.answer("این پری به حداکثر سطح رسیده!", show_alert=True)
+        return
+
+    next_level = current_level + 1
+    cost = get_upgrade_cost(index, current_level)
+
+    text = (
+        "⬆️✨ ارتقای پری\n\n"
+        f"🧚🏻‍♀️ می‌خوای پری {data['name']} رو ارتقا بدی؟\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"💎 هزینه: {format_number(cost)} تینکی‌پوینت\n"
+        f"⚡ تولید جدید: {format_decimal(get_production(index, next_level))} امتیاز در ثانیه\n"
+        f"📦 ظرفیت جدید: {format_number(get_capacity(index, next_level))} تینکی‌پوینت\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🌟 با این ارتقا، پریت قوی‌تر می‌شه و می‌تونه امتیاز بیشتری برات جمع کنه! 🍃"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ تأیید ارتقا", callback_data=f"confirm_upgrade_{index}")],
+        [InlineKeyboardButton("🔙 بازگشت به پری‌های من", callback_data="my_fairies")],
+    ]
+
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def confirm_upgrade(update, context, index):
+    user = update.effective_user
+    conn = get_db()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT points FROM users WHERE user_id = %s FOR UPDATE",
+                (user.id,),
+            )
+            row = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT level
+                FROM fairies
+                WHERE user_id = %s AND fairy_index = %s
+                FOR UPDATE
+                """,
+                (user.id, index),
+            )
+            fairy_row = cur.fetchone()
+
+            if not fairy_row:
+                conn.rollback()
+                await update.callback_query.answer("این پری رو نداری!", show_alert=True)
+                return
+
+            current_level = fairy_row[0]
+            data = FAIRIES[index]
+
+            if current_level >= data["max_level"]:
+                conn.rollback()
+                await update.callback_query.answer("این پری به حداکثر سطح رسیده!", show_alert=True)
+                return
+
+            cost = get_upgrade_cost(index, current_level)
+
+            if not row or row[0] < cost:
+                conn.rollback()
+                await update.callback_query.answer("تینکی‌پوینت کافی نداری!", show_alert=True)
+                return
+
+            cur.execute(
+                """
+                SELECT stored_points, last_collection
+                FROM fairies
+                WHERE user_id = %s AND fairy_index = %s
+                """,
+                (user.id, index),
+            )
+            stored_row = cur.fetchone()
+
+            now = time.time()
+            last_collection = stored_row[1] or now
+            elapsed = max(0, now - last_collection)
+            generated = elapsed * get_production(index, current_level)
+            stored = min(
+                get_capacity(index, current_level),
+                (stored_row[0] or 0) + generated,
+            )
+
+            cur.execute(
+                "UPDATE users SET points = points - %s WHERE user_id = %s",
+                (cost, user.id),
+            )
+
+            cur.execute(
+                """
+                UPDATE fairies
+                SET level = level + 1,
+                    stored_points = %s,
+                    last_collection = %s
+                WHERE user_id = %s AND fairy_index = %s
+                """,
+                (stored, now, user.id, index),
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    new_level = current_level + 1
+
+    text = (
+        "🎉✨ ارتقای پری با موفقیت انجام شد!\n\n"
+        f"🧚🏻‍♀️ پری: {data['name']}\n"
+        f"🌟 سطح: {format_number(current_level)} ← {format_number(new_level)}\n"
+        f"💎 هزینه: {format_number(cost)} تینکی‌پوینت\n"
+        f"⚡ تولید جدید: {format_decimal(get_production(index, new_level))} امتیاز در ثانیه\n"
+        f"📦 ظرفیت جدید: {format_number(get_capacity(index, new_level))} تینکی‌پوینت"
+    )
+
+    await update.callback_query.answer("ارتقا انجام شد! ✨")
+    await update.callback_query.message.reply_text(text)
+
+
+async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user)
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT user_id, name, points, tinkies
+                FROM users
+                ORDER BY points DESC, user_id ASC
+                LIMIT 5
+                """
+            )
+            top_users = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT COUNT(*) + 1 AS rank
+                FROM users
+                WHERE points > (
+                    SELECT points FROM users WHERE user_id = %s
+                )
+                """,
+                (user.id,),
+            )
+            rank_data = cur.fetchone()
+    finally:
+        conn.close()
+
+    medals = [
+        "🥇 رتبه‌ی اول",
+        "🥈 رتبه‌ی دوم",
+        "🥉 رتبه‌ی سوم",
+        "🏅 رتبه‌ی چهارم",
+        "🏅 رتبه‌ی پنجم",
+    ]
+
+    top_lines = []
+
+    for position, medal in enumerate(medals):
+        if position < len(top_users):
+            player = top_users[position]
+
+            top_lines.append(
+                f"{medal}\n"
+                f"👤 نام پری‌دار: {player['name'] or 'بازیکن'}\n"
+                f"💎 تینکی‌پوینت: {format_number(player['points'])}\n"
+                f"🧚🏻‍♀️ تینکی‌های فعلی: {format_number(player['tinkies'])}"
+            )
+        else:
+            top_lines.append(f"{medal}\nهنوز بازیکنی نیست")
+
+    user_data = get_user(user.id)
+    user_rank = rank_data["rank"] if rank_data else "؟"
+
+    text = (
+        "🏆✨ برترین پری‌داران پیکسی هالو ✨🏆\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🌟 اینجا جایگاه ۵ بازیکن برتر سرزمین پری‌هاست!\n\n"
+        "🧚🏻‍♀️ هرکسی که تینکی‌پوینت بیشتری جمع کنه، به صدر جدول نزدیک‌تر می‌شه!\n\n"
+        + "\n\n━━━━━━━━━━━━━━\n\n".join(top_lines)
+        + "\n\n━━━━━━━━━━━━━━\n\n"
+        f"💎 رتبه‌ی تو: {format_number(user_rank)}\n"
+        f"✨ تینکی‌پوینت تو: {format_number(user_data['points'])}\n"
+        f"🧚🏻‍♀️ تینکی‌های فعلی تو: {format_number(user_data['tinkies'])}\n\n"
+        "🍃 تلاش کن تا اسم تو هم بین برترین‌های پیکسی هالو بدرخشه! 🪄"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text)
+    else:
+        await update.message.reply_text(text)
+
+
+async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🧚🏻‍♀️✨ درباره‌ی پیکسی هالو ✨🧚🏻‍♀️\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🌸 به دنیای جادویی پری‌ها خوش اومدی!\n\n"
+        "🪄 پیکسی هالو یه بازی سرگرم‌کننده با حال‌وهوای دنیای پری‌هاست؛ جایی که می‌تونی پری‌های مختلف رو جمع‌آوری کنی، قدرتشون رو افزایش بدی و برای رسیدن به بالاترین رتبه با بقیه‌ی بازیکن‌ها رقابت کنی!\n\n"
+        "🍃 ماجراجویی تو از اینجا شروع می‌شه:\n\n"
+        "🧚🏻‍♀️ جمع‌آوری پری‌های دوست‌داشتنی\n"
+        "💎 به‌دست‌آوردن تینکی‌پوینت\n"
+        "⬆️ ارتقای پری‌ها و افزایش توانایی‌هاشون\n"
+        "🏆 رقابت با بازیکن‌های دیگه\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "💚 آماده‌ای جای خودت رو در پیکسی هالو پیدا کنی؟\n\n"
+        "✨ جادوی ماجراجویی تو تازه شروع شده! 🦋"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text)
+    else:
+        await update.message.reply_text(text)
+
+
+async def show_guide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📜🧚🏻‍♀️ راهنمای بازی پیکسی هالو\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🌱 ۱. شروع ماجراجویی\n\n"
+        "🪄 کلمه‌ی «تینک» رو بفرست تا تینکی‌پوینت به دست بیاری!\n\n"
+        "⏳ بین هر بار استفاده از «تینک» باید مدت مشخصی صبر کنی.\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🧚🏻‍♀️ ۲. خرید پری\n\n"
+        "✨ وارد بخش «پری‌های سرزمین» شو و پری موردعلاقه‌ات رو انتخاب کن.\n\n"
+        "💎 برای خرید هر پری به مقدار مشخصی تینکی‌پوینت نیاز داری.\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "💰 ۳. جمع‌آوری تینکی‌پوینت\n\n"
+        "🍃 پری‌هات به‌مرور برات امتیاز تولید می‌کنن.\n\n"
+        "📦 برای دریافت امتیازهای ذخیره‌شده، وارد بخش «پری‌های من» شو و روی دکمه‌ی «جمع‌آوری تینکی‌پوینت» بزن.\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "⬆️ ۴. ارتقای پری‌ها\n\n"
+        "🌟 با ارتقای پری‌هات می‌تونی سرعت تولید و ظرفیت ذخیره‌ی امتیازشون رو افزایش بدی.\n\n"
+        "💎 هزینه‌ی ارتقا به پری و سطح فعلیش بستگی داره.\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "🏆 ۵. لیدربرد\n\n"
+        "🥇 از بخش «لیدربرد» رتبه‌ی بازیکن‌ها رو ببین و تلاش کن به جمع برترین پری‌داران پیکسی هالو برسی!\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "💚 حالا وقتشه ماجراجوییت رو شروع کنی!\n\n"
+        "🧚🏻‍♀️✨ کلمه‌ی «تینک» رو بفرست و وارد دنیای پری‌ها شو!"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text)
+    else:
+        await update.message.reply_text(text)
+
+
+async def handle_tinky(update: Update):
+    user = update.effective_user
+    ensure_user(user)
+
+    data = get_user(user.id)
+    now = time.time()
+    elapsed = now - (data["last_tinky"] or 0)
+
+    if elapsed < COOLDOWN:
+        remaining = int(COOLDOWN - elapsed)
+        minutes, seconds = divmod(remaining, 60)
+
+        if minutes > 0 and seconds > 0:
+            remaining_text = f"{format_number(minutes)} دقیقه و {format_number(seconds)} ثانیه"
+        elif minutes > 0:
+            remaining_text = f"{format_number(minutes)} دقیقه"
+        else:
+            remaining_text = f"{format_number(seconds)} ثانیه"
+
+        await update.message.reply_text(
+            "🍃 هنوز وقت استراحته! 🧚🏻‍♀️\n\n"
+            f"🕐 {remaining_text} دیگه می‌تونی دوباره بگی «تینک»! 💚✨"
+        )
+        return
+
+    old_level = get_level(data["tinkies"])
+    reward = random.randint(5, 15) + (old_level - 1) * 2
+    new_tinkies = data["tinkies"] + 1
+    new_level = get_level(new_tinkies)
+    bonus = new_level * 100 if new_level > old_level else 0
+    total_reward = reward + bonus
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET tinkies = tinkies + 1,
+                    points = points + %s,
+                    last_tinky = %s
+                WHERE user_id = %s
+                """,
+                (total_reward, now, user.id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    updated = get_user(user.id)
+
+    if bonus > 0:
+        text = (
+            "🎉✨ ارتقای سطح! ✨🎉\n\n"
+            f"🌟 سطح {format_number(old_level)} ← {format_number(new_level)}\n\n"
+            f"💎 امتیاز دریافتی: +{format_number(reward)}\n"
+            f"🎁 جایزه‌ی ارتقای سطح: +{format_number(bonus)}"
+        )
+    else:
+        text = (
+            "🧚🏻‍♀️✨ تینک! جادوی تو بیدار شد! ✨🪄\n\n"
+            f"💎 امتیاز این بار: +{format_number(reward)} تینکی‌پوینت\n"
+            f"💰 کل تینکی‌پوینت‌های تو: {format_number(updated['points'])}"
+        )
+
+    await update.message.reply_text(text)
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+
+    if text == "تینک":
+        await handle_tinky(update)
+    elif text in ["پروفایل", "پروفایل من", "تینکیم"]:
+        await show_profile(update, context)
+    elif text in ["پری", "پری ها", "پری‌ها", "پری‌های سرزمین", "پری های سرزمین"]:
+        await send_main_menu(update.message)
+    elif text in ["پری های من", "پری‌های من"]:
+        await show_my_fairies(update, context)
+    elif text in ["جمع", "جمع کردن", "جمع‌آوری", "جمع آوری", "جمع‌آوری تینکی‌پوینت"]:
+        await collect_points(update, context)
+    elif text in ["ارتقا", "آپگرید", "اپگرید"]:
+        await show_my_fairies(update, context)
+    elif text in ["منو", "منوی اصلی", "menu"]:
+        await send_main_menu(update.message)
+    elif text in ["/top", "لیدربرد", "رتبه", "برترین"]:
+        await show_leaderboard(update, context)
+    elif text in ["درباره", "درباره‌ی ربات", "درباره ربات"]:
+        await show_about(update, context)
+    elif text in ["راهنما", "راهنمای بازی"]:
+        await show_guide(update, context)
+
+
+async def send_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_main_menu(update.message)
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data or ""
+
+    if data == "menu":
+        await query.answer()
+        await send_main_menu(query.message)
+    elif data == "profile":
+        await show_profile(update, context)
+    elif data == "fairies":
+        await show_fairies(update, context)
+    elif data == "my_fairies":
+        await show_my_fairies(update, context)
+    elif data == "collect":
+        await collect_points(update, context)
+    elif data == "upgrade_menu":
+        await show_upgrade_menu(update, context)
+    elif data == "leaderboard":
+        await show_leaderboard(update, context)
+    elif data == "about":
+        await show_about(update, context)
+    elif data == "guide":
+        await show_guide(update, context)
+    elif data.startswith("yes_buy_"):
+        try:
+            index = int(data.rsplit("_", 1)[1])
+        except (ValueError, IndexError):
+            await query.answer("خطا!", show_alert=True)
+            return
+        await confirm_buy_fairy(update, context, index)
+    elif data.startswith("no_buy_"):
+        await cancel_buy_fairy(update, context)
+    elif data.startswith("buy_"):
+        try:
+            index = int(data.split("_", 1)[1])
+        except (ValueError, IndexError):
+            await query.answer("خطا!", show_alert=True)
+            return
+        await show_buy_confirmation(update, context, index)
+    elif data.startswith("confirm_upgrade_"):
+        try:
+            index = int(data.rsplit("_", 1)[1])
+        except (ValueError, IndexError):
+            await query.answer("خطا!", show_alert=True)
+            return
+        await confirm_upgrade(update, context, index)
+    elif data.startswith("upgrade_"):
+        try:
+            index = int(data.split("_", 1)[1])
+        except (ValueError, IndexError):
+            await query.answer("خطا!", show_alert=True)
+            return
+        await show_upgrade(update, context, index)
+    elif data.startswith("owned_"):
+        await query.answer("این پری رو قبلاً خریدی! 🧚🏻‍♀️", show_alert=True)
+    else:
+        await query.answer()
+
 
 app = Flask(__name__)
 
 
-def now_tehran():
-    return datetime.now(TEHRAN)
-
-
-def today_key():
-    return now_tehran().date().isoformat()
-
-
-def week_key():
-    today = now_tehran().date()
-    monday = today - timedelta(days=today.weekday())
-    return monday.isoformat()
-
-
-def db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-
-def init_db():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            name TEXT,
-            tinkies BIGINT DEFAULT 0,
-            points BIGINT DEFAULT 0,
-            last_tinky DOUBLE PRECISION DEFAULT 0
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS fairies (
-            user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-            fairy_index INTEGER,
-            level INTEGER DEFAULT 1,
-            stored_points BIGINT DEFAULT 0,
-            last_collection DOUBLE PRECISION DEFAULT 0,
-            PRIMARY KEY(user_id, fairy_index)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_stats (
-            user_id BIGINT,
-            stat_key TEXT,
-            value BIGINT DEFAULT 0,
-            PRIMARY KEY(user_id, stat_key)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_activity_days (
-            user_id BIGINT,
-            activity_date DATE,
-            PRIMARY KEY(user_id, activity_date)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_talents (
-            user_id BIGINT,
-            talent_name TEXT,
-            level INTEGER DEFAULT 1,
-            xp INTEGER DEFAULT 0,
-            unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY(user_id, talent_name)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_quest_progress (
-            user_id BIGINT,
-            period_type TEXT,
-            period_key TEXT,
-            quest_id TEXT,
-            progress BIGINT DEFAULT 0,
-            target BIGINT,
-            claimed BOOLEAN DEFAULT FALSE,
-            PRIMARY KEY(user_id, period_type, period_key, quest_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_quest_claims (
-            user_id BIGINT,
-            period_type TEXT,
-            period_key TEXT,
-            quest_id TEXT,
-            reward BIGINT,
-            claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY(user_id, period_type, period_key, quest_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_talent_milestone_claims (
-            user_id BIGINT,
-            talent_name TEXT,
-            level INTEGER,
-            reward BIGINT,
-            PRIMARY KEY(user_id, talent_name, level)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_quest_bonus_claims (
-            user_id BIGINT,
-            period_type TEXT,
-            period_key TEXT,
-            reward BIGINT,
-            PRIMARY KEY(user_id, period_type, period_key)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_streaks (
-            user_id BIGINT PRIMARY KEY,
-            current_streak INTEGER DEFAULT 0,
-            last_completed_date DATE
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ph_streak_rewards (
-            user_id BIGINT,
-            streak_count INTEGER,
-            reward BIGINT,
-            PRIMARY KEY(user_id, streak_count)
-        )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def ensure_user(user_id, name):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users(user_id,name) VALUES(%s,%s) "
-        "ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name",
-        (user_id, name),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def get_user(user_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    result = cur.fetchone()
-    cur.close()
-    conn.close()
-    return result
-
-
-def get_stat(cur, user_id, key):
-    cur.execute(
-        "SELECT value FROM ph_stats WHERE user_id=%s AND stat_key=%s",
-        (user_id, key),
-    )
-    row = cur.fetchone()
-    return int(row["value"]) if row else 0
-
-
-def add_stat(cur, user_id, key, amount=1):
-    cur.execute("""
-        INSERT INTO ph_stats(user_id,stat_key,value)
-        VALUES(%s,%s,%s)
-        ON CONFLICT(user_id,stat_key)
-        DO UPDATE SET value=ph_stats.value+EXCLUDED.value
-    """, (user_id, key, amount))
-
-
-def mark_activity(cur, user_id):
-    cur.execute(
-        "INSERT INTO ph_activity_days(user_id,activity_date) VALUES(%s,%s) ON CONFLICT DO NOTHING",
-        (user_id, now_tehran().date()),
-    )
-
-
-def get_activity_days(cur, user_id):
-    cur.execute("SELECT COUNT(*) AS count FROM ph_activity_days WHERE user_id=%s", (user_id,))
-    return int(cur.fetchone()["count"])
-
-
-def get_period_progress(cur, user_id, period_type, period_key, quest_id, target):
-    cur.execute("""
-        INSERT INTO ph_quest_progress(user_id,period_type,period_key,quest_id,target)
-        VALUES(%s,%s,%s,%s,%s)
-        ON CONFLICT(user_id,period_type,period_key,quest_id) DO NOTHING
-    """, (user_id, period_type, period_key, quest_id, target))
-    cur.execute("""
-        SELECT * FROM ph_quest_progress
-        WHERE user_id=%s AND period_type=%s AND period_key=%s AND quest_id=%s
-    """, (user_id, period_type, period_key, quest_id))
-    return cur.fetchone()
-
-
-def update_quest_progress(cur, user_id, period_type, quest_id, amount):
-    period_key = today_key() if period_type == "daily" else week_key()
-    quests = DAILY_QUESTS if period_type == "daily" else WEEKLY_QUESTS
-    if quest_id not in quests:
-        return
-    target = quests[quest_id][1]
-    get_period_progress(cur, user_id, period_type, period_key, quest_id, target)
-    cur.execute("""
-        UPDATE ph_quest_progress
-        SET progress=LEAST(target,progress+%s)
-        WHERE user_id=%s AND period_type=%s AND period_key=%s AND quest_id=%s
-    """, (amount, user_id, period_type, period_key, quest_id))
-
-
-def update_event_quests(cur, user_id, event, amount=1):
-    daily_map = {
-        "tinky": "daily_tinky",
-        "collections": "daily_collect",
-        "upgrades": "daily_upgrade",
-        "points": "daily_points",
-    }
-    weekly_map = {
-        "tinky": "weekly_tinky",
-        "collections": "weekly_collect",
-        "upgrades": "weekly_upgrade",
-        "buys": "weekly_buy",
-        "points": "weekly_points",
-    }
-    if event in daily_map:
-        update_quest_progress(cur, user_id, "daily", daily_map[event], amount)
-    if event in weekly_map:
-        update_quest_progress(cur, user_id, "weekly", weekly_map[event], amount)
-
-
-def record_activity(cur, user_id, event, points=0):
-    mark_activity(cur, user_id)
-    add_stat(cur, user_id, "activities")
-    add_stat(cur, user_id, event)
-    update_event_quests(cur, user_id, event)
-    if points > 0:
-        update_event_quests(cur, user_id, "points", points)
-
-
-def refresh_talent_unlocks(cur, user_id):
-    for talent, data in TALENTS.items():
-        if talent == "حیوانات":
-            progress = get_activity_days(cur, user_id)
-        else:
-            progress = get_stat(cur, user_id, data["stat"])
-
-        cur.execute("""
-            INSERT INTO ph_talent_unlock_progress(user_id,talent_name,progress,target)
-            VALUES(%s,%s,%s,%s)
-            ON CONFLICT(user_id,talent_name)
-            DO UPDATE SET progress=EXCLUDED.progress,target=EXCLUDED.target
-        """, (user_id, talent, progress, data["target"]))
-
-
-def talent_xp_needed(level):
-    return 500 + 250 * (level - 1)
-
-
-def grant_talent_xp(cur, user_id, talent, xp):
-    cur.execute(
-        "SELECT * FROM ph_talents WHERE user_id=%s AND talent_name=%s FOR UPDATE",
-        (user_id, talent),
-    )
-    row = cur.fetchone()
-    if not row:
-        return 0
-
-    level = row["level"]
-    current_xp = row["xp"] + xp
-    earned_rewards = 0
-
-    while level < 50 and current_xp >= talent_xp_needed(level):
-        current_xp -= talent_xp_needed(level)
-        level += 1
-        reward = MILESTONE_REWARDS.get(level, 0)
-        if reward:
-            cur.execute("""
-                INSERT INTO ph_talent_milestone_claims(user_id,talent_name,level,reward)
-                VALUES(%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-                RETURNING reward
-            """, (user_id, talent, level, reward))
-            claimed = cur.fetchone()
-            if claimed:
-                earned_rewards += reward
-
-    if level >= 50:
-        current_xp = 0
-
-    cur.execute("""
-        UPDATE ph_talents SET level=%s,xp=%s
-        WHERE user_id=%s AND talent_name=%s
-    """, (level, current_xp, user_id, talent))
-
-    if earned_rewards:
-        cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (earned_rewards, user_id))
-
-    return earned_rewards
-
-
-def main_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            ["🧚🏻‍♀️ پری‌های من"],
-            ["👤 پروفایل من", "🏆 لیدربرد"],
-            ["✨ پری‌های سرزمین", "💫 درباره‌ی ربات"],
-            ["📜 راهنمای بازی"],
-            ["📜 مأموریت‌ها", "✨ استعدادهای من"],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def inline_back():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu")]])
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    ensure_user(user.id, user.first_name or "پری")
-    conn = db()
-    cur = conn.cursor()
-
-    period = today_key()
-    get_period_progress(cur, user.id, "daily", period, "daily_login", 1)
-    cur.execute("""
-        UPDATE ph_quest_progress SET progress=1
-        WHERE user_id=%s AND period_type='daily' AND period_key=%s
-        AND quest_id='daily_login'
-    """, (user.id, period))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await update.message.reply_text(
-        "🧚🏻‍♀️✨ به پیکسی هالو خوش اومدی! ✨🧚🏻‍♀️\n\n"
-        "به سرزمین پری‌ها خوش اومدی!\n"
-        "اینجا می‌تونی پری‌ها رو جمع‌آوری کنی، ارتقاشون بدی و مأموریت انجام بدی.",
-        reply_markup=main_keyboard(),
-    )
-
-
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user(update.effective_user.id)
-    if not user:
-        return
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) AS count FROM fairies WHERE user_id=%s", (user["user_id"],))
-    count = cur.fetchone()["count"]
-    cur.close()
-    conn.close()
-
-    await update.message.reply_text(
-        f"👤 شناسنامه‌ی {user['name']}\n\n"
-        f"✨ تینکی‌ها: {user['tinkies']:,}\n"
-        f"💎 امتیازها: {user['points']:,}\n"
-        f"🧚🏻‍♀️ تعداد پری‌ها: {count}",
-        reply_markup=inline_back(),
-    )
-
-
-async def handle_tinky(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    user = cur.fetchone()
-
-    if not user:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        return
-
-    remaining = COOLDOWN - (time.time() - user["last_tinky"])
-    if remaining > 0:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await update.message.reply_text(
-            f"⏳ هنوز آماده نیستی!\nزمان باقی‌مانده: {int(remaining)} ثانیه"
-        )
-        return
-
-    reward = random.randint(10, 30)
-    cur.execute("""
-        UPDATE users SET tinkies=tinkies+1,points=points+%s,last_tinky=%s
-        WHERE user_id=%s
-    """, (reward, time.time(), user_id))
-
-    record_activity(cur, user_id, "tinky", reward)
-    refresh_talent_unlocks(cur, user_id)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await update.message.reply_text(
-        f"✨ تینک موفقیت‌آمیز بود!\n\n"
-        f"💎 {reward:,} امتیاز دریافت کردی."
-    )
-
-
-async def show_fairies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM fairies WHERE user_id=%s ORDER BY fairy_index
-    """, (user_id,))
-    owned = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    if not owned:
-        await update.message.reply_text("هنوز پری‌ای نداری! از بخش پری‌های سرزمین می‌تونی پری بخری.")
-        return
-
-    lines = ["🧚🏻‍♀️ پری‌های تو:\n"]
-    for fairy in owned:
-        info = FAIRIES[fairy["fairy_index"]]
-        lines.append(
-            f"✨ {info['name']}\n"
-            f"سطح: {fairy['level']}\n"
-            f"امتیاز ذخیره‌شده: {fairy['stored_points']:,}\n"
-        )
-    await update.message.reply_text("\n".join(lines), reply_markup=inline_back())
-
-
-async def fairy_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT fairy_index FROM fairies WHERE user_id=%s", (user_id,))
-    owned = {row["fairy_index"] for row in cur.fetchall()}
-    cur.close()
-    conn.close()
-
-    buttons = []
-    for index, fairy in enumerate(FAIRIES):
-        if index not in owned:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{fairy['name']} - {fairy['price']:,} امتیاز",
-                    callback_data=f"buy:{index}",
-                )
-            ])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
-
-    await update.message.reply_text(
-        "✨ پری‌های سرزمین\n\nپری موردنظرت رو انتخاب کن:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def collect_fairy(query, user_id, fairy_index):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM fairies WHERE user_id=%s AND fairy_index=%s FOR UPDATE
-    """, (user_id, fairy_index))
-    fairy = cur.fetchone()
-
-    if not fairy:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این پری رو نداری!")
-        return
-
-    info = FAIRIES[fairy_index]
-    elapsed = max(0, time.time() - fairy["last_collection"])
-    produced = int(elapsed * info["production"] * fairy["level"])
-    available = max(0, info["capacity"] * fairy["level"] - fairy["stored_points"])
-    amount = min(produced, available)
-
-    if amount <= 0:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("هنوز امتیازی برای جمع‌آوری آماده نشده!")
-        return
-
-    cur.execute("""
-        UPDATE fairies
-        SET stored_points=stored_points-%s,last_collection=%s
-        WHERE user_id=%s AND fairy_index=%s
-    """, (amount, time.time(), user_id, fairy_index))
-    cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (amount, user_id))
-
-    record_activity(cur, user_id, "collections", amount)
-    refresh_talent_unlocks(cur, user_id)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await query.edit_message_text(f"💎 {amount:,} امتیاز از {info['name']} جمع‌آوری شد!")
-
-
-async def upgrade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM fairies WHERE user_id=%s ORDER BY fairy_index
-    """, (update.effective_user.id,))
-    owned = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    if not owned:
-        await update.message.reply_text("هنوز پری‌ای برای ارتقا نداری!")
-        return
-
-    buttons = []
-    for fairy in owned:
-        info = FAIRIES[fairy["fairy_index"]]
-        if fairy["level"] < info["max_level"]:
-            cost = int(info["price"] * (fairy["level"] ** 1.5))
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{info['name']} - سطح {fairy['level']} | {cost:,}",
-                    callback_data=f"upgrade:{fairy['fairy_index']}",
-                )
-            ])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
-
-    await update.message.reply_text(
-        "⬆️ کدوم پری رو ارتقا می‌دی؟",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT name,points FROM users ORDER BY points DESC LIMIT 10")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    text = "🏆 لیدربرد پیکسی هالو\n\n"
-    for index, row in enumerate(rows, 1):
-        text += f"{index}. {row['name']} — {row['points']:,} امتیاز\n"
-    await update.message.reply_text(text, reply_markup=inline_back())
-
-
-async def show_quests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = db()
-    cur = conn.cursor()
-
-    sections = [
-        ("daily", today_key(), DAILY_QUESTS, "☀️ مأموریت‌های روزانه"),
-        ("weekly", week_key(), WEEKLY_QUESTS, "🌙 مأموریت‌های هفتگی"),
-    ]
-
-    text = "📜 مأموریت‌ها\n"
-    buttons = []
-
-    for period_type, period_key, quests, heading in sections:
-        text += f"\n{heading}\n"
-        for quest_id, (name, target, reward, stat) in quests.items():
-            row = get_period_progress(cur, user_id, period_type, period_key, quest_id, target)
-            progress = min(row["progress"], target)
-            status = "✅ دریافت شد" if row["claimed"] else f"{progress}/{target}"
-            text += f"\n• {name}: {status}\n  پاداش: {reward:,} امتیاز\n"
-
-            if progress >= target and not row["claimed"]:
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"🎁 دریافت: {name}",
-                        callback_data=f"claim:{period_type}:{quest_id}",
-                    )
-                ])
-
-        cur.execute("""
-            SELECT COUNT(*) AS count FROM ph_quest_progress
-            WHERE user_id=%s AND period_type=%s AND period_key=%s AND claimed=TRUE
-        """, (user_id, period_type, period_key))
-        claimed_count = cur.fetchone()["count"]
-        bonus = 3000 if period_type == "daily" else 10000
-        if claimed_count == 5:
-            cur.execute("""
-                SELECT 1 FROM ph_quest_bonus_claims
-                WHERE user_id=%s AND period_type=%s AND period_key=%s
-            """, (user_id, period_type, period_key))
-            if not cur.fetchone():
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"🎉 پاداش تکمیل {heading}: {bonus:,}",
-                        callback_data=f"bonus:{period_type}",
-                    )
-                ])
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def show_talents(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = db()
-    cur = conn.cursor()
-    refresh_talent_unlocks(cur, user_id)
-
-    text = "✨ استعدادهای تو\n"
-    buttons = []
-
-    for talent, data in TALENTS.items():
-        cur.execute(
-            "SELECT * FROM ph_talents WHERE user_id=%s AND talent_name=%s",
-            (user_id, talent),
-        )
-        unlocked = cur.fetchone()
-
-        cur.execute("""
-            SELECT progress,target FROM ph_talent_unlock_progress
-            WHERE user_id=%s AND talent_name=%s
-        """, (user_id, talent))
-        progress = cur.fetchone()
-
-        if unlocked:
-            needed = talent_xp_needed(unlocked["level"]) if unlocked["level"] < 50 else 0
-            text += (
-                f"\n✨ {talent}\n"
-                f"سطح: {unlocked['level']}/50\n"
-                f"تجربه: {unlocked['xp']}/{needed}\n"
-                f"مأموریت هفتگی: {data['weekly']}\n"
-            )
-            buttons.append([
-                InlineKeyboardButton(
-                    f"📜 مأموریت هفتگی {talent}",
-                    callback_data=f"talentquest:{talent}",
-                )
-            ])
-        else:
-            text += (
-                f"\n🔒 {talent}\n"
-                f"شرط آزادسازی: {data['unlock']}\n"
-                f"پیشرفت: {progress['progress']}/{progress['target']}\n"
-            )
-            if progress["progress"] >= progress["target"]:
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"🎁 آزادسازی استعداد {talent}",
-                        callback_data=f"unlock:{talent}",
-                    )
-                ])
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def show_talent_quests(query, user_id, talent):
-    if talent not in TALENTS:
-        await query.edit_message_text("استعداد موردنظر پیدا نشد.")
-        return
-
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM ph_talents WHERE user_id=%s AND talent_name=%s",
-        (user_id, talent),
-    )
-    unlocked = cur.fetchone()
-
-    if not unlocked:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این استعداد هنوز آزاد نشده است.")
-        return
-
-    data = TALENTS[talent]
-    progress = (
-        get_activity_days(cur, user_id)
-        if data["weekly_stat"] == "activity_days"
-        else get_stat(cur, user_id, data["weekly_stat"])
-    )
-
-    period = week_key()
-    quest_id = f"talent_{talent}"
-    target = data["weekly_target"]
-
-    cur.execute("""
-        INSERT INTO ph_quest_progress(user_id,period_type,period_key,quest_id,target)
-        VALUES(%s,'talent',%s,%s,%s)
-        ON CONFLICT DO NOTHING
-    """, (user_id, period, quest_id, target))
-
-    cur.execute("""
-        SELECT * FROM ph_quest_progress
-        WHERE user_id=%s AND period_type='talent' AND period_key=%s AND quest_id=%s
-    """, (user_id, period, quest_id))
-    row = cur.fetchone()
-
-    if not row["claimed"]:
-        cur.execute("""
-            UPDATE ph_quest_progress SET progress=LEAST(%s,%s)
-            WHERE user_id=%s AND period_type='talent' AND period_key=%s AND quest_id=%s
-        """, (target, progress, user_id, period, quest_id))
-        row["progress"] = min(progress, target)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    text = (
-        f"✨ مأموریت هفتگی استعداد {talent}\n\n"
-        f"{data['weekly']}\n"
-        f"پیشرفت: {row['progress']}/{target}\n\n"
-        "🎁 پاداش: ۵۰۰۰ امتیاز + ۵۰۰ تجربه استعداد"
-    )
-
-    buttons = []
-    if row["progress"] >= target and not row["claimed"]:
-        buttons.append([
-            InlineKeyboardButton(
-                "🎁 دریافت پاداش",
-                callback_data=f"claimtalent:{talent}",
-            )
-        ])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="talents")])
-
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def claim_quest(query, user_id, period_type, quest_id):
-    quests = DAILY_QUESTS if period_type == "daily" else WEEKLY_QUESTS
-    if quest_id not in quests:
-        await query.edit_message_text("مأموریت پیدا نشد.")
-        return
-
-    name, target, reward, _ = quests[quest_id]
-    period = today_key() if period_type == "daily" else week_key()
-
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    cur.fetchone()
-
-    row = get_period_progress(cur, user_id, period_type, period, quest_id, target)
-    if row["claimed"] or row["progress"] < target:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این مأموریت هنوز کامل نشده یا پاداشش قبلاً دریافت شده است.")
-        return
-
-    cur.execute("""
-        INSERT INTO ph_quest_claims(user_id,period_type,period_key,quest_id,reward)
-        VALUES(%s,%s,%s,%s,%s)
-        ON CONFLICT DO NOTHING RETURNING reward
-    """, (user_id, period_type, period, quest_id, reward))
-    claimed = cur.fetchone()
-
-    if not claimed:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("پاداش این مأموریت قبلاً دریافت شده است.")
-        return
-
-    cur.execute("""
-        UPDATE ph_quest_progress SET claimed=TRUE
-        WHERE user_id=%s AND period_type=%s AND period_key=%s AND quest_id=%s
-    """, (user_id, period_type, period, quest_id))
-    cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (reward, user_id))
-
-    add_stat(cur, user_id, "missions")
-    if period_type == "weekly":
-        add_stat(cur, user_id, "weekly_missions")
-
-    refresh_talent_unlocks(cur, user_id)
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await query.edit_message_text(f"🎉 مأموریت «{name}» تکمیل شد!\n💎 {reward:,} امتیاز دریافت کردی.")
-
-
-async def claim_bonus(query, user_id, period_type):
-    period = today_key() if period_type == "daily" else week_key()
-    reward = 3000 if period_type == "daily" else 10000
-
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    cur.fetchone()
-
-    cur.execute("""
-        SELECT COUNT(*) AS count FROM ph_quest_progress
-        WHERE user_id=%s AND period_type=%s AND period_key=%s AND claimed=TRUE
-    """, (user_id, period_type, period))
-    count = cur.fetchone()["count"]
-
-    if count < 5:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("هنوز همه مأموریت‌ها دریافت نشده‌اند.")
-        return
-
-    cur.execute("""
-        INSERT INTO ph_quest_bonus_claims(user_id,period_type,period_key,reward)
-        VALUES(%s,%s,%s,%s)
-        ON CONFLICT DO NOTHING RETURNING reward
-    """, (user_id, period_type, period, reward))
-    claimed = cur.fetchone()
-
-    if not claimed:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این پاداش قبلاً دریافت شده است.")
-        return
-
-    cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (reward, user_id))
-
-    if period_type == "daily":
-        update_streak(cur, user_id)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await query.edit_message_text(f"🎉 آفرین!\n💎 {reward:,} امتیاز پاداش تکمیل مأموریت‌ها دریافت کردی.")
-
-
-def update_streak(cur, user_id):
-    today = now_tehran().date()
-    cur.execute("SELECT * FROM ph_streaks WHERE user_id=%s FOR UPDATE", (user_id,))
-    row = cur.fetchone()
-
-    if not row:
-        streak = 1
-        cur.execute("""
-            INSERT INTO ph_streaks(user_id,current_streak,last_completed_date)
-            VALUES(%s,1,%s)
-        """, (user_id, today))
-    elif row["last_completed_date"] == today:
-        return
-    elif row["last_completed_date"] == today - timedelta(days=1):
-        streak = row["current_streak"] + 1
-        cur.execute("""
-            UPDATE ph_streaks SET current_streak=%s,last_completed_date=%s
-            WHERE user_id=%s
-        """, (streak, today, user_id))
-    else:
-        streak = 1
-        cur.execute("""
-            UPDATE ph_streaks SET current_streak=1,last_completed_date=%s
-            WHERE user_id=%s
-        """, (today, user_id))
-
-    rewards = {3: 2000, 7: 7000, 14: 15000, 30: 40000}
-    if streak > 30 and streak % 30 == 0:
-        rewards[streak] = 40000
-
-    reward = rewards.get(streak, 0)
-    if reward:
-        cur.execute("""
-            INSERT INTO ph_streak_rewards(user_id,streak_count,reward)
-            VALUES(%s,%s,%s)
-            ON CONFLICT DO NOTHING RETURNING reward
-        """, (user_id, streak, reward))
-        result = cur.fetchone()
-        if result:
-            cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (reward, user_id))
-
-
-async def unlock_talent(query, user_id, talent):
-    if talent not in TALENTS:
-        await query.edit_message_text("استعداد موردنظر پیدا نشد.")
-        return
-
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    cur.fetchone()
-
-    refresh_talent_unlocks(cur, user_id)
-    cur.execute("""
-        SELECT progress,target FROM ph_talent_unlock_progress
-        WHERE user_id=%s AND talent_name=%s
-    """, (user_id, talent))
-    progress = cur.fetchone()
-
-    if not progress or progress["progress"] < progress["target"]:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("شرط آزادسازی این استعداد هنوز کامل نشده است.")
-        return
-
-    cur.execute("""
-        INSERT INTO ph_talents(user_id,talent_name,level,xp)
-        VALUES(%s,%s,1,0)
-        ON CONFLICT DO NOTHING RETURNING talent_name
-    """, (user_id, talent))
-    result = cur.fetchone()
-
-    if not result:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این استعداد قبلاً آزاد شده است.")
-        return
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await query.edit_message_text(f"🎉 استعداد «{talent}» آزاد شد!\nسطح اولیه: ۱")
-
-
-async def claim_talent_quest(query, user_id, talent):
-    if talent not in TALENTS:
-        await query.edit_message_text("استعداد پیدا نشد.")
-        return
-
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    cur.fetchone()
-
-    cur.execute(
-        "SELECT * FROM ph_talents WHERE user_id=%s AND talent_name=%s FOR UPDATE",
-        (user_id, talent),
-    )
-    unlocked = cur.fetchone()
-
-    if not unlocked:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این استعداد هنوز آزاد نشده است.")
-        return
-
-    period = week_key()
-    quest_id = f"talent_{talent}"
-    target = TALENTS[talent]["weekly_target"]
-
-    cur.execute("""
-        SELECT * FROM ph_quest_progress
-        WHERE user_id=%s AND period_type='talent' AND period_key=%s AND quest_id=%s
-        FOR UPDATE
-    """, (user_id, period, quest_id))
-    row = cur.fetchone()
-
-    if not row or row["claimed"] or row["progress"] < target:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("مأموریت هنوز کامل نشده یا پاداش آن دریافت شده است.")
-        return
-
-    cur.execute("""
-        UPDATE ph_quest_progress SET claimed=TRUE
-        WHERE user_id=%s AND period_type='talent' AND period_key=%s AND quest_id=%s
-    """, (user_id, period, quest_id))
-
-    cur.execute("UPDATE users SET points=points+5000 WHERE user_id=%s", (user_id,))
-    milestone_reward = grant_talent_xp(cur, user_id, talent, 500)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    extra = f"\n🎖 پاداش ارتقای سطح: {milestone_reward:,} امتیاز" if milestone_reward else ""
-    await query.edit_message_text(
-        f"🎉 مأموریت هفتگی استعداد «{talent}» کامل شد!\n"
-        f"💎 ۵۰۰۰ امتیاز\n"
-        f"✨ ۵۰۰ تجربه استعداد{extra}"
-    )
-
-
-async def buy_fairy(query, user_id, fairy_index):
-    if fairy_index < 0 or fairy_index >= len(FAIRIES):
-        await query.edit_message_text("پری موردنظر پیدا نشد.")
-        return
-
-    info = FAIRIES[fairy_index]
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    user = cur.fetchone()
-
-    cur.execute(
-        "SELECT 1 FROM fairies WHERE user_id=%s AND fairy_index=%s",
-        (user_id, fairy_index),
-    )
-    if cur.fetchone():
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این پری رو قبلاً خریدی!")
-        return
-
-    if user["points"] < info["price"]:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("امتیاز کافی برای خرید این پری نداری.")
-        return
-
-    cur.execute("UPDATE users SET points=points-%s WHERE user_id=%s", (info["price"], user_id))
-    cur.execute("""
-        INSERT INTO fairies(user_id,fairy_index,level,stored_points,last_collection)
-        VALUES(%s,%s,1,0,%s)
-    """, (user_id, fairy_index, time.time()))
-
-    record_activity(cur, user_id, "buys")
-    refresh_talent_unlocks(cur, user_id)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await query.edit_message_text(f"🎉 {info['name']} به مجموعه پری‌هات اضافه شد!")
-
-
-async def upgrade_fairy(query, user_id, fairy_index):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (user_id,))
-    user = cur.fetchone()
-
-    cur.execute("""
-        SELECT * FROM fairies WHERE user_id=%s AND fairy_index=%s FOR UPDATE
-    """, (user_id, fairy_index))
-    fairy = cur.fetchone()
-
-    if not fairy:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این پری رو نداری.")
-        return
-
-    info = FAIRIES[fairy_index]
-    if fairy["level"] >= info["max_level"]:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("این پری به حداکثر سطح خودش رسیده!")
-        return
-
-    cost = int(info["price"] * (fairy["level"] ** 1.5))
-    if user["points"] < cost:
-        conn.rollback()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("امتیاز کافی برای ارتقای این پری نداری.")
-        return
-
-    cur.execute("UPDATE users SET points=points-%s WHERE user_id=%s", (cost, user_id))
-    cur.execute("""
-        UPDATE fairies SET level=level+1
-        WHERE user_id=%s AND fairy_index=%s
-    """, (user_id, fairy_index))
-
-    record_activity(cur, user_id, "upgrades")
-    refresh_talent_unlocks(cur, user_id)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await query.edit_message_text(
-        f"🎉 {info['name']} با موفقیت ارتقا پیدا کرد!\n"
-        f"سطح جدید: {fairy['level'] + 1}"
-    )
-
-
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💫 درباره‌ی پیکسی هالو\n\n"
-        "به دنیای جادویی پری‌ها خوش اومدی!\n"
-        "پری جمع کن، امتیاز بگیر، مأموریت انجام بده و استعدادهای جدید آزاد کن.",
-        reply_markup=inline_back(),
-    )
-
-
-async def guide(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📜 راهنمای بازی\n\n"
-        "🧚🏻‍♀️ با دستور /tinky می‌تونی تینک انجام بدی.\n"
-        "✨ از بخش پری‌های سرزمین پری جدید بخر.\n"
-        "💎 امتیاز پری‌هات رو جمع‌آوری کن.\n"
-        "⬆️ پری‌هات رو ارتقا بده.\n"
-        "📜 مأموریت‌های روزانه و هفتگی رو انجام بده.\n"
-        "🌟 با تکمیل شرط‌ها استعدادهای جدید آزاد کن.\n\n"
-        "دستورها:\n"
-        "/quests - مأموریت‌ها\n"
-        "/daily - مأموریت‌های روزانه\n"
-        "/weekly - مأموریت‌های هفتگی\n"
-        "/talents - استعدادها\n"
-        "/talentquests - مأموریت‌های استعدادها",
-        reply_markup=inline_back(),
-    )
-
-
-async def menu_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-
-    if text == "🧚🏻‍♀️ پری‌های من":
-        await show_fairies(update, context)
-    elif text == "👤 پروفایل من":
-        await profile(update, context)
-    elif text == "🏆 لیدربرد":
-        await leaderboard(update, context)
-    elif text == "✨ پری‌های سرزمین":
-        await fairy_shop(update, context)
-    elif text == "💫 درباره‌ی ربات":
-        await about(update, context)
-    elif text == "📜 راهنمای بازی":
-        await guide(update, context)
-    elif text == "📜 مأموریت‌ها":
-        await show_quests(update, context)
-    elif text == "✨ استعدادهای من":
-        await show_talents(update, context)
-    elif text == "⬆️ ارتقای پری‌ها":
-        await upgrade_menu(update, context)
-
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-
-    if data == "menu":
-        await query.message.reply_text("🧚🏻‍♀️ منوی اصلی", reply_markup=main_keyboard())
-    elif data == "talents":
-        await show_talents_callback(query, user_id)
-    elif data.startswith("buy:"):
-        await buy_fairy(query, user_id, int(data.split(":")[1]))
-    elif data.startswith("upgrade:"):
-        await upgrade_fairy(query, user_id, int(data.split(":")[1]))
-    elif data.startswith("collect:"):
-        await collect_fairy(query, user_id, int(data.split(":")[1]))
-    elif data.startswith("claim:"):
-        _, period_type, quest_id = data.split(":", 2)
-        await claim_quest(query, user_id, period_type, quest_id)
-    elif data.startswith("bonus:"):
-        await claim_bonus(query, user_id, data.split(":")[1])
-    elif data.startswith("unlock:"):
-        await unlock_talent(query, user_id, data.split(":", 1)[1])
-    elif data.startswith("talentquest:"):
-        await show_talent_quests(query, user_id, data.split(":", 1)[1])
-    elif data.startswith("claimtalent:"):
-        await claim_talent_quest(query, user_id, data.split(":", 1)[1])
-
-
-async def show_talents_callback(query, user_id):
-    class FakeUser:
-        id = user_id
-
-    conn = db()
-    cur = conn.cursor()
-    refresh_talent_unlocks(cur, user_id)
-
-    text = "✨ استعدادهای تو\n"
-    buttons = []
-
-    for talent, data in TALENTS.items():
-        cur.execute(
-            "SELECT * FROM ph_talents WHERE user_id=%s AND talent_name=%s",
-            (user_id, talent),
-        )
-        unlocked = cur.fetchone()
-
-        cur.execute("""
-            SELECT progress,target FROM ph_talent_unlock_progress
-            WHERE user_id=%s AND talent_name=%s
-        """, (user_id, talent))
-        progress = cur.fetchone()
-
-        if unlocked:
-            needed = talent_xp_needed(unlocked["level"]) if unlocked["level"] < 50 else 0
-            text += f"\n✨ {talent}\nسطح: {unlocked['level']}/50\nتجربه: {unlocked['xp']}/{needed}\n"
-            buttons.append([
-                InlineKeyboardButton(
-                    f"📜 مأموریت هفتگی {talent}",
-                    callback_data=f"talentquest:{talent}",
-                )
-            ])
-        else:
-            text += (
-                f"\n🔒 {talent}\n"
-                f"شرط: {data['unlock']}\n"
-                f"پیشرفت: {progress['progress']}/{progress['target']}\n"
-            )
-            if progress["progress"] >= progress["target"]:
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"🎁 آزادسازی {talent}",
-                        callback_data=f"unlock:{talent}",
-                    )
-                ])
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_quests(update, context)
-
-
-async def weekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_quests(update, context)
-
-
-async def talentquests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_talents(update, context)
-
-
-async def talents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_talents(update, context)
-
-
-async def quests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_quests(update, context)
-
-
-async def tink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await handle_tinky(update, context)
-
-
-async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM fairies WHERE user_id=%s ORDER BY fairy_index", (user_id,))
-    fairies = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    if not fairies:
-        await update.message.reply_text("هنوز پری‌ای نداری!")
-        return
-
-    buttons = []
-    for fairy in fairies:
-        info = FAIRIES[fairy["fairy_index"]]
-        buttons.append([
-            InlineKeyboardButton(
-                f"💎 جمع‌آوری از {info['name']}",
-                callback_data=f"collect:{fairy['fairy_index']}",
-            )
-        ])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
-
-    await update.message.reply_text(
-        "از کدوم پری امتیاز جمع‌آوری می‌کنی؟",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def upgrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await upgrade_menu(update, context)
-
-
 @app.route("/")
 def home():
-    return "Pixie Hollow Bot is running!"
+    return "Pixie Hollow Bot is running! 🧚🏻‍♀️"
 
 
 @app.route("/health")
 def health():
-    return {"status": "ok"}
+    return "OK"
 
 
 def run_flask():
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 
-async def post_init(application: Application):
-    init_db()
-    logger.info("Pixie Hollow bot initialized.")
+async def post_init(application):
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        bot_info = await application.bot.get_me()
+        logging.info("Bot started: @%s", bot_info.username)
+    except Exception as e:
+        logging.error("Post init error: %s", e)
 
 
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is missing")
+        raise ValueError("BOT_TOKEN is not set")
+
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL environment variable is missing")
+        raise ValueError("DATABASE_URL is not set")
 
     init_db()
 
     Thread(target=run_flask, daemon=True).start()
 
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("tinky", tink_command))
-    application.add_handler(CommandHandler("tink", tink_command))
-    application.add_handler(CommandHandler("collect", collect_command))
-    application.add_handler(CommandHandler("upgrade", upgrade_command))
-    application.add_handler(CommandHandler("profile", profile))
-    application.add_handler(CommandHandler("quests", quests_command))
-    application.add_handler(CommandHandler("daily", daily_command))
-    application.add_handler(CommandHandler("weekly", weekly_command))
-    application.add_handler(CommandHandler("talents", talents_command))
-    application.add_handler(CommandHandler("talentquests", talentquests_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard))
-
-    application.add_handler(CallbackQueryHandler(callback_handler))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, menu_message)
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
     )
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("top", show_leaderboard))
+    application.add_handler(CommandHandler("menu", send_menu_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler)
+    )
+
+    logging.info("Pixie Hollow Bot is starting...")
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
